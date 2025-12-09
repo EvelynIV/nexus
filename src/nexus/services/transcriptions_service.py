@@ -7,6 +7,7 @@ import grpc
 
 from ..clients.grpc.stubs import UxSpeechClient
 from ..generated import ux_speech_pb2
+from ..core.config import settings
 
 
 def _parse_hotwords(hotwords: str) -> List[str]:
@@ -28,9 +29,7 @@ def _build_request_stream(
     hotword_bias: float = 0.0,
 ) -> Iterable[ux_speech_pb2.StreamingRecognizeRequest]:
     """
-    Yield a stream of StreamingRecognizeRequest for the gRPC API.
-
-    First yields the streaming config, then yields audio chunks.
+    First yields the streaming config, then yields audio content.
     """
     config = ux_speech_pb2.StreamingRecognitionConfig(
         config=ux_speech_pb2.RecognitionConfig(
@@ -45,21 +44,21 @@ def _build_request_stream(
     )
 
     yield ux_speech_pb2.StreamingRecognizeRequest(streaming_config=config)
-
-    # 你当前逻辑：一次性发送全部音频
+     # 你当前逻辑：一次性发送全部音频
     yield ux_speech_pb2.StreamingRecognizeRequest(audio_content=audio_bytes)
-
-    # 如果未来要真·流式分片：
+ # 如果未来要真·流式分片：
     # chunk_size = 4096
     # for start in range(0, len(audio_bytes), chunk_size):
     #     chunk = audio_bytes[start : start + chunk_size]
     #     yield ux_speech_pb2.StreamingRecognizeRequest(audio_content=chunk)
 
-
 class TranscriptionsService:
     """
-    Application service for the /v1/audio/transcriptions endpoint.
+    Application service for speech-to-text gateway.
     """
+
+    def __init__(self, default_client: UxSpeechClient | None = None) -> None:
+        self._default_client = default_client
 
     async def transcribe(
         self,
@@ -70,13 +69,27 @@ class TranscriptionsService:
         interim_results: bool,
         hotwords: str,
         hotword_bias: float,
-        grpc_host: str,
-        grpc_port: int,
-        timeout_s: float = 180.0,
+        grpc_host: str | None = None,
+        grpc_port: int | None = None,
+        timeout_s: float | None = None,
     ) -> str:
+        # Resolve defaults from settings
+        host = grpc_host or settings.default_grpc_host
+        port = grpc_port or settings.default_grpc_port
+        timeout = timeout_s or settings.grpc_timeout_s
+
         hotwords_list = _parse_hotwords(hotwords)
 
-        client = UxSpeechClient(host=grpc_host, port=grpc_port)
+        # Use shared default client only when host/port not overridden
+        use_shared = (
+            grpc_host is None
+            and grpc_port is None
+            and self._default_client is not None
+            and self._default_client.host == host
+            and self._default_client.port == port
+        )
+
+        client = self._default_client if use_shared else UxSpeechClient(host=host, port=port)
 
         requests_iter = _build_request_stream(
             audio_bytes=audio_bytes,
@@ -90,26 +103,22 @@ class TranscriptionsService:
         final_texts: List[str] = []
 
         try:
-            # stub.StreamingRecognize 是阻塞式迭代器
-            # 用 asyncio.to_thread 放到默认线程池执行
             def _call():
-                return client.stub.StreamingRecognize(requests_iter, timeout=timeout_s)
+                # 阻塞式流调用
+                return client.stub.StreamingRecognize(requests_iter, timeout=timeout)
 
             responses = await asyncio.to_thread(_call)
 
             for resp in responses:
-                results = getattr(resp, "results", None) or []
-                for result in results:
-                    alts = getattr(result, "alternative", None)
-                    transcript = getattr(alts, "transcript", "") if alts else ""
-                    is_final = bool(getattr(result, "is_final", False))
-                    if is_final and transcript:
+                for result in getattr(resp, "results", []) or []:
+                    alt = getattr(result, "alternative", None)
+                    transcript = getattr(alt, "transcript", "") if alt else ""
+                    if getattr(result, "is_final", False) and transcript:
                         final_texts.append(transcript)
 
-        except grpc.RpcError as rpc_err:
-            # 让上层（路由）决定如何映射 HTTP
-            raise rpc_err
         finally:
-            client.close()
+            # 只关闭“临时”客户端
+            if not use_shared:
+                client.close()
 
         return " ".join(final_texts).strip()

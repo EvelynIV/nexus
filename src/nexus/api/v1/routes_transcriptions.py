@@ -1,17 +1,20 @@
-# src/ux_speech_gateway/api/v1/routes_transcriptions.py
 from __future__ import annotations
 
+from typing import Optional
+
 import grpc
-from fastapi import APIRouter, File, UploadFile, Form, Depends
+from fastapi import APIRouter, File, UploadFile, Form, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ...services.transcriptions_service import TranscriptionsService
+from ...core.config import settings
 
 router = APIRouter()
 
 
-def get_transcriptions_service() -> TranscriptionsService:
-    return TranscriptionsService()
+def get_transcriptions_service(request: Request) -> TranscriptionsService:
+    default_client = getattr(request.app.state, "default_grpc_client", None)
+    return TranscriptionsService(default_client=default_client)
 
 
 @router.post("/v1/audio/transcriptions")
@@ -23,19 +26,16 @@ async def transcriptions(
     interim_results: bool = Form(False),
     hotwords: str = Form(""),
     hotword_bias: float = Form(0.0),
-    grpc_host: str = Form("39.106.1.132"),
-    grpc_port: int = Form(30029),
+
+    # 关键：不在路由层写死默认值
+    grpc_host: Optional[str] = Form(None),
+    grpc_port: Optional[int] = Form(None),
+    grpc_timeout_s: Optional[float] = Form(None),
+
     response_format: str = Form("json"),
     temperature: float = Form(0.0),  # 兼容 OpenAI 形状，当前不使用
     svc: TranscriptionsService = Depends(get_transcriptions_service),
 ):
-    """
-    Mimic OpenAI speech_to_text endpoint.
-
-    Accepts a multipart file upload and optional form params.
-    Forwards audio to the remote gRPC `UxSpeech` service and returns
-    a JSON with the combined final transcript.
-    """
     try:
         audio_bytes = await file.read()
     except Exception as e:
@@ -52,9 +52,9 @@ async def transcriptions(
             interim_results=interim_results,
             hotwords=hotwords,
             hotword_bias=hotword_bias,
-            grpc_host=grpc_host,
-            grpc_port=grpc_port,
-            timeout_s=180.0,
+            grpc_host=grpc_host,              # 允许覆盖
+            grpc_port=grpc_port,              # 允许覆盖
+            timeout_s=grpc_timeout_s,         # 允许覆盖
         )
 
     except grpc.RpcError as rpc_err:
@@ -82,6 +82,7 @@ async def transcriptions(
         vtt = "WEBVTT\n\n00:00.000 --> 00:10.000\n" + (combined or "") + "\n"
         return PlainTextResponse(content=vtt, media_type="text/vtt", status_code=200)
 
-    # default json
-    result = {"text": combined, "model": model}
-    return JSONResponse(status_code=200, content=result)
+    return JSONResponse(
+        status_code=200,
+        content={"text": combined, "model": model, "default_grpc": f"{settings.default_grpc_host}:{settings.default_grpc_port}"},
+    )
