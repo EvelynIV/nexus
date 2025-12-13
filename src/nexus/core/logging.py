@@ -1,4 +1,4 @@
-# src/ux_speech_gateway/core/logging.py
+# src/nexus/core/logging.py
 # 作用：统一日志配置。
 
 # 内容：
@@ -12,7 +12,7 @@
 # 所有模块调用 logging.getLogger(__name__) 都能享受统一格式和输出。
 
 import logging
-from logging.config import dictConfig
+from .config import dictConfig
 
 
 def setup_logging():

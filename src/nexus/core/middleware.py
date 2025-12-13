@@ -1,10 +1,11 @@
-# src/ux_speech_gateway/core/middleware.py
+# src/nexus/core/middleware.py
 import time
 import uuid
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from .logging import setup_logging
+import logging
 
 
 setup_logging()

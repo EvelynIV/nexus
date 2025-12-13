@@ -10,7 +10,7 @@ app = create_app()
 
 def run():
     uvicorn.run(#启动一个asgi服务器，用来跑异步web服务框架，（打开一个服务端口，把app放进去
-        "ux_speech_gateway.main:app",#类似于import路径，告诉uvicorn去哪里找app对象，将app对象放入端口运行
+        "nexus.main:app",#类似于import路径，告诉uvicorn去哪里找app对象，将app对象放入端口运行
         host=settings.http_host,
         port=settings.http_port,
         reload=(settings.env == "dev"),#自动重启服务  区分开发环境和生产环境

@@ -1,4 +1,4 @@
-# src/ux_speech_gateway/core/security.py
+# src/nexus/core/security.py
 from fastapi import Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
