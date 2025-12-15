@@ -8,7 +8,7 @@ from typing import Optional
 import grpc
 from fastapi import APIRouter, File, UploadFile, Form, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-
+from fastapi import Request, HTTPException, status
 from ...services.transcriptions_service import TranscriptionsService
 from ...core.config import settings
 
@@ -18,8 +18,14 @@ router = APIRouter()
 #可以在router_include时写入或覆盖prefix和tags
 
 #把一些可能多次利用或需要依赖注入的服务打包成类或函数，方便在路由函数中使用通过Depends注入
+#只有在作为依赖被调用是，request中才有值
 def get_transcriptions_service(request: Request) -> TranscriptionsService:
     default_client = getattr(request.app.state, "default_grpc_client", None)
+    if default_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="gRPC client not initialized",
+        )
     return TranscriptionsService(default_client=default_client)
 
 
