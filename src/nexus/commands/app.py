@@ -8,6 +8,7 @@ import typer
 import uvicorn
 from fastapi import FastAPI
 
+from nexus.api.v1 import realtime as realtime_api
 from nexus.api.v1 import transcribe as transcribe_api
 
 app = typer.Typer(
@@ -23,6 +24,7 @@ def create_fastapi_app(grpc_addr: str) -> FastAPI:
     """创建 FastAPI 应用实例"""
     # 配置 gRPC 地址
     transcribe_api.configure(grpc_addr=grpc_addr)
+    realtime_api.configure(grpc_addr=grpc_addr)
 
     fastapi_app = FastAPI(
         title="Nexus ASR API",
@@ -32,6 +34,7 @@ def create_fastapi_app(grpc_addr: str) -> FastAPI:
 
     # 注册路由
     fastapi_app.include_router(transcribe_api.router, prefix="/v1")
+    fastapi_app.include_router(realtime_api.router, prefix="/v1")
 
     @fastapi_app.get("/health")
     async def health_check():
@@ -70,6 +73,25 @@ def serve(
         help="日志级别 (debug, info, warning, error)",
         envvar="NEXUS_LOG_LEVEL",
     ),
+    # 🔐 新增 SSL 参数
+    ssl_certfile: str = typer.Option(
+        None,
+        "--ssl-certfile",
+        help="SSL 证书文件路径 (server.crt)",
+        envvar="NEXUS_SSL_CERTFILE",
+    ),
+    ssl_keyfile: str = typer.Option(
+        None,
+        "--ssl-keyfile",
+        help="SSL 私钥文件路径 (server.key)",
+        envvar="NEXUS_SSL_KEYFILE",
+    ),
+    ssl_ca_certs: str = typer.Option(
+        None,
+        "--ssl-ca-certs",
+        help="CA 证书链文件（可选）",
+        envvar="NEXUS_SSL_CA_CERTS",
+    ),
 ):
     """
     启动 HTTP API 服务器
@@ -82,7 +104,9 @@ def serve(
 
     logger.info(f"Starting Nexus API server on {host}:{port}")
     logger.info(f"gRPC ASR backend: {grpc_addr}")
-
+    logger.info(
+        f"ssl_certfile: {ssl_certfile}, ssl_keyfile: {ssl_keyfile}, ssl_ca_certs: {ssl_ca_certs}"
+    )
     # 创建 FastAPI 应用
     fastapi_app = create_fastapi_app(grpc_addr=grpc_addr)
 
@@ -92,6 +116,9 @@ def serve(
         host=host,
         port=port,
         log_level=log_level.lower(),
+        ssl_ca_certs=ssl_ca_certs,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
     )
 
 

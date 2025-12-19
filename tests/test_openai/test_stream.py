@@ -1,8 +1,12 @@
 from openai import OpenAI
+import httpx
 
 client = OpenAI(
     api_key="dummy_api_key",
-    base_url="http://localhost:8000/v1"
+    base_url="https://localhost:8000/v1",
+    http_client=httpx.Client(
+        verify=False  # 🔴 关键：关闭证书校验
+    ),
 )
 
 audio_file_path = "data-bin/huaqiang/403369728_nb2-1-30280_left_16k.wav"
