@@ -19,7 +19,7 @@ COPY . .
 RUN poetry install
 
 # 暴露 gRPC 服务端口
-EXPOSE 50051
+EXPOSE 8000
 
 # 默认入口
 CMD ["poetry", "run", "python", "-m", "nexus.commands.app"]
