@@ -25,38 +25,70 @@ class Inferencer:
         """
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def chat(self, prompt: str, model: str) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
+    ) -> str:
         """
         非流式 Chat 推理，返回完整响应。
 
-        :param prompt: 用户输入的文本
+        :param messages: 完整的消息列表
         :param model: 模型名称
+        :param temperature: 温度参数
+        :param max_tokens: 最大 token 数
         :return: 模型生成的完整响应文本
         """
         try:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            params = {
+                "model": model,
+                "messages": messages,
+            }
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            params.update(kwargs)
+
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content or ""
         except Exception as err:
             logger.error("Chat inference error: %s", err)
             return ""
 
-    def chat_stream(self, prompt: str, model: str) -> Iterator[str]:
+    def chat_stream(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
+    ) -> Iterator[str]:
         """
         流式 Chat 推理，返回响应文本迭代器。
 
-        :param prompt: 用户输入的文本
+        :param messages: 完整的消息列表
         :param model: 模型名称
+        :param temperature: 温度参数
+        :param max_tokens: 最大 token 数
         :return: 生成器，逐步返回模型生成的文本片段
         """
         try:
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-            )
+            params = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+            }
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            params.update(kwargs)
+
+            stream = self.client.chat.completions.create(**params)
 
             for chunk in stream:
                 delta = chunk.choices[0].delta

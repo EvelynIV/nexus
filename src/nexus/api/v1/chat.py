@@ -96,14 +96,25 @@ class ChatCompletionResponse(BaseModel):
 # ============== API 端点 ==============
 
 
-def _generate_sse_stream(inferencer: Inferencer, prompt: str, model: str):
+def _generate_sse_stream(
+    inferencer: Inferencer,
+    messages: list[dict],
+    model: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+):
     """
     生成 SSE 流式响应（兼容 OpenAI 流式格式）
     """
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     created = int(time.time())
 
-    for chunk in inferencer.chat_stream(prompt, model):
+    for chunk in inferencer.chat_stream(
+        messages=messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    ):
         event_data = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -147,18 +158,20 @@ async def create_chat_completion(
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    # 获取最后一条用户消息作为 prompt
-    user_messages = [m for m in request.messages if m.role == "user"]
-    if not user_messages:
-        raise HTTPException(status_code=400, detail="No user message found")
-
-    prompt = user_messages[-1].content
+    # 转换消息格式为字典列表（透明转发）
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
     model = request.model
 
     if request.stream:
         # 流式响应
         return StreamingResponse(
-            _generate_sse_stream(inferencer, prompt, model),
+            _generate_sse_stream(
+                inferencer=inferencer,
+                messages=messages,
+                model=model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -168,7 +181,12 @@ async def create_chat_completion(
 
     # 非流式响应
     try:
-        response_text = inferencer.chat(prompt, model)
+        response_text = inferencer.chat(
+            messages=messages,
+            model=model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
         return ChatCompletionResponse(
