@@ -34,8 +34,7 @@ tools = [
 
 def send_messages(messages):
     response = client.chat.completions.create(
-        # model="deepseek-chat",
-        model="Qwen/Qwen3-8B",
+        model=os.getenv("TEST_MODEL"),
         messages=messages,
         tools=tools,
     )
@@ -45,7 +44,7 @@ def send_messages(messages):
 system_prompt = "你必须用中文回答我"
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": "今天金华的天气怎么样？"},
+    {"role": "user", "content": "今天金华的天气怎么样？ /no_think"},
 ]
 message = send_messages(messages)
 print(f"User>\t {messages}")

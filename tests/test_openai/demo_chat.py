@@ -13,7 +13,7 @@ client = openai.OpenAI(
 
 
 respons = client.chat.completions.create(
-    model="qwen3:8B",
+    model=os.getenv("TEST_MODEL"),
     messages=[
         {"role": "system", "content": "你是一个有帮助的助手。"},
         {"role": "user", "content": "介绍一下你自己和你的公司。 /no_think"},
