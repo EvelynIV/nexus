@@ -9,6 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from nexus.api.v1 import chat as chat_api
+from nexus.api.v1 import depends
 from nexus.api.v1 import realtime as realtime_api
 from nexus.api.v1 import transcribe as transcribe_api
 from nexus.api.v1 import tts as tts_api
@@ -34,7 +35,7 @@ def create_fastapi_app(
     transcribe_api.configure(grpc_addr=grpc_addr)
     realtime_api.configure(grpc_addr=grpc_addr)
     # 配置 Chat API
-    chat_api.configure(base_url=chat_base_url, api_key=chat_api_key)
+    depends.configure_chat(base_url=chat_base_url, api_key=chat_api_key)
     # 配置 TTS API
     tts_api.configure(base_url=tts_base_url, api_key=tts_api_key)
 
@@ -59,52 +60,12 @@ def create_fastapi_app(
 
 @app.command()
 def serve(
-    host: str = typer.Option(
-        "0.0.0.0",
-        "--host",
-        "-h",
-        help="HTTP 服务监听地址",
-        envvar="NEXUS_HOST",
-    ),
-    port: int = typer.Option(
-        8000,
-        "--port",
-        "-p",
-        help="HTTP 服务监听端口",
-        envvar="NEXUS_PORT",
-    ),
     grpc_addr: str = typer.Option(
         "localhost:50051",
         "--grpc-addr",
         "-g",
         help="gRPC ASR 服务地址",
         envvar="NEXUS_GRPC_ADDR",
-    ),
-    log_level: str = typer.Option(
-        "info",
-        "--log-level",
-        "-l",
-        help="日志级别 (debug, info, warning, error)",
-        envvar="NEXUS_LOG_LEVEL",
-    ),
-    # 🔐 新增 SSL 参数
-    ssl_certfile: str = typer.Option(
-        None,
-        "--ssl-certfile",
-        help="SSL 证书文件路径 (server.crt)",
-        envvar="NEXUS_SSL_CERTFILE",
-    ),
-    ssl_keyfile: str = typer.Option(
-        None,
-        "--ssl-keyfile",
-        help="SSL 私钥文件路径 (server.key)",
-        envvar="NEXUS_SSL_KEYFILE",
-    ),
-    ssl_ca_certs: str = typer.Option(
-        None,
-        "--ssl-ca-certs",
-        help="CA 证书链文件（可选）",
-        envvar="NEXUS_SSL_CA_CERTS",
     ),
     # Chat API 参数
     chat_base_url: str = typer.Option(
@@ -131,6 +92,46 @@ def serve(
         "--tts-api-key",
         help="TTS 后端 API 密钥",
         envvar="NEXUS_TTS_API_KEY",
+    ),
+    log_level: str = typer.Option(
+        "info",
+        "--log-level",
+        "-l",
+        help="日志级别 (debug, info, warning, error)",
+        envvar="NEXUS_LOG_LEVEL",
+    ),
+    host: str = typer.Option(
+        "0.0.0.0",
+        "--host",
+        "-h",
+        help="HTTP 服务监听地址",
+        envvar="NEXUS_HOST",
+    ),
+    port: int = typer.Option(
+        8000,
+        "--port",
+        "-p",
+        help="HTTP 服务监听端口",
+        envvar="NEXUS_PORT",
+    ),
+    # 🔐 新增 SSL 参数
+    ssl_certfile: str = typer.Option(
+        None,
+        "--ssl-certfile",
+        help="SSL 证书文件路径 (server.crt)",
+        envvar="NEXUS_SSL_CERTFILE",
+    ),
+    ssl_keyfile: str = typer.Option(
+        None,
+        "--ssl-keyfile",
+        help="SSL 私钥文件路径 (server.key)",
+        envvar="NEXUS_SSL_KEYFILE",
+    ),
+    ssl_ca_certs: str = typer.Option(
+        None,
+        "--ssl-ca-certs",
+        help="CA 证书链文件（可选）",
+        envvar="NEXUS_SSL_CA_CERTS",
     ),
 ):
     """

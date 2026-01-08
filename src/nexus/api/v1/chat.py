@@ -7,93 +7,27 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Annotated, List, Literal, Optional
+from collections.abc import Iterable, Iterator
+from typing import Annotated, Optional, Union, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion_audio_param import ChatCompletionAudioParam
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+from openai.types.chat.chat_completion_tool_union_param import (
+    ChatCompletionToolUnionParam,
+)
+from openai.types.completion_usage import CompletionUsage
 
 from nexus.inferencers.chat.inferencer import Inferencer
 
+from .depends import get_chat_inferencer as get_inferencer
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
 logger = logging.getLogger(__name__)
-
-
-# ============== 配置 ==============
-
-
-@dataclass
-class ChatSettings:
-    """Chat API 配置"""
-    base_url: str = "http://localhost:8080/v1"
-    api_key: str = "no-key"
-
-
-_settings: Optional[ChatSettings] = None
-
-
-def get_settings() -> ChatSettings:
-    if _settings is None:
-        raise RuntimeError("Chat settings not configured. Call configure() first.")
-    return _settings
-
-
-def configure(base_url: str, api_key: str):
-    """配置全局设置"""
-    global _settings
-    _settings = ChatSettings(base_url=base_url, api_key=api_key)
-
-
-def get_inferencer(
-    settings: Annotated[ChatSettings, Depends(get_settings)],
-) -> Inferencer:
-    return Inferencer(
-        base_url=settings.base_url,
-        api_key=settings.api_key,
-    )
-
-
-# ============== 请求/响应模型 ==============
-
-
-class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
-
-
-class ChatCompletionRequest(BaseModel):
-    model: str = "mt01"
-    messages: List[ChatMessage]
-    stream: bool = False
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-
-
-class ChatCompletionChoice(BaseModel):
-    index: int
-    message: ChatMessage
-    finish_reason: str
-
-
-class ChatCompletionUsage(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-
-class ChatCompletionResponse(BaseModel):
-    id: str
-    object: str = "chat.completion"
-    created: int
-    model: str
-    choices: List[ChatCompletionChoice]
-    usage: ChatCompletionUsage
-
-
-# ============== API 端点 ==============
 
 
 def _generate_sse_stream(
@@ -102,7 +36,7 @@ def _generate_sse_stream(
     model: str,
     temperature: float | None = None,
     max_tokens: int | None = None,
-):
+) -> Iterator[str]:
     """
     生成 SSE 流式响应（兼容 OpenAI 流式格式）
     """
@@ -120,34 +54,63 @@ def _generate_sse_stream(
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"content": chunk},
-                "finish_reason": None,
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": chunk},
+                    "finish_reason": None,
+                }
+            ],
         }
         yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-    # 发送结束 chunk
     end_data = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }
+        ],
     }
     yield f"data: {json.dumps(end_data, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
 
+def build_response(response_text: str, model: str) -> ChatCompletion:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+
+    return ChatCompletion(
+        id=completion_id,
+        created=int(time.time()),
+        model=model,
+        choices=[
+            Choice(
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content=response_text),
+                finish_reason="stop",
+            )
+        ],
+        usage=CompletionUsage(prompt_tokens=0, total_tokens=0, completion_tokens=0),
+        object="chat.completion",
+    )
+
+
 @router.post("/completions")
 async def create_chat_completion(
-    request: ChatCompletionRequest,
     inferencer: Annotated[Inferencer, Depends(get_inferencer)],
+    messages: Annotated[List[ChatCompletionMessageParam], Body(..., embed=True)],
+    model: Annotated[str, Body(..., embed=True)],
+    audio: Annotated[Optional[ChatCompletionAudioParam], Body(embed=True)] = None,
+    tools: Annotated[List[ChatCompletionToolUnionParam], Body(embed=True)] = [],
+    frequency_penalty: Annotated[Optional[float], Body(embed=True)] = None,
+    temperature: Annotated[Optional[float], Body(embed=True)] = None,
+    max_tokens: Annotated[Optional[int], Body(embed=True)] = None,
+    stream: Annotated[bool, Body(embed=True)] = False,
 ):
     """
     创建 Chat Completion
@@ -155,22 +118,16 @@ async def create_chat_completion(
     兼容 OpenAI Chat API 格式
     支持 stream=True 参数返回 SSE 流式响应
     """
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
 
-    # 转换消息格式为字典列表（透明转发）
-    messages = [{"role": m.role, "content": m.content} for m in request.messages]
-    model = request.model
-
-    if request.stream:
+    if stream:
         # 流式响应
         return StreamingResponse(
             _generate_sse_stream(
                 inferencer=inferencer,
                 messages=messages,
                 model=model,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
+                temperature=temperature,
+                max_tokens=max_tokens,
             ),
             media_type="text/event-stream",
             headers={
@@ -181,27 +138,16 @@ async def create_chat_completion(
 
     # 非流式响应
     try:
-        response_text = inferencer.chat(
+        response = inferencer.chat(
             messages=messages,
             model=model,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
+            audio=audio,
+            tools=tools,
+            frequency_penalty=frequency_penalty,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-
-        return ChatCompletionResponse(
-            id=completion_id,
-            created=int(time.time()),
-            model=model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=response_text),
-                    finish_reason="stop",
-                )
-            ],
-            usage=ChatCompletionUsage(),
-        )
+        return response
     except Exception as e:
         logger.error(f"Chat completion error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

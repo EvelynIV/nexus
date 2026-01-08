@@ -1,8 +1,15 @@
 import logging
-from typing import Iterator
+from typing import Iterator, List, Optional
 
 from openai import OpenAI
-
+from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion_audio_param import ChatCompletionAudioParam
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+from openai.types.chat.chat_completion_tool_union_param import (
+    ChatCompletionToolUnionParam,
+)
+from openai.types.completion_usage import CompletionUsage
 
 logger = logging.getLogger(__name__)
 
@@ -27,34 +34,28 @@ class Inferencer:
 
     def chat(
         self,
-        messages: list[dict],
+        messages: List[ChatCompletionMessageParam],
         model: str,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        **kwargs,
-    ) -> str:
-        """
-        非流式 Chat 推理，返回完整响应。
+        audio: Optional[ChatCompletionAudioParam] = None,
+        tools: List[ChatCompletionToolUnionParam] = [],
+        frequency_penalty: Optional[float] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        stream: bool = False,
+    ):
 
-        :param messages: 完整的消息列表
-        :param model: 模型名称
-        :param temperature: 温度参数
-        :param max_tokens: 最大 token 数
-        :return: 模型生成的完整响应文本
-        """
         try:
-            params = {
-                "model": model,
-                "messages": messages,
-            }
-            if temperature is not None:
-                params["temperature"] = temperature
-            if max_tokens is not None:
-                params["max_tokens"] = max_tokens
-            params.update(kwargs)
-
-            response = self.client.chat.completions.create(**params)
-            return response.choices[0].message.content or ""
+            response = self.client.chat.completions.create(
+                messages=messages,
+                model=model,
+                audio=audio,
+                tools=tools,
+                frequency_penalty=frequency_penalty,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream,
+            )
+            return response
         except Exception as err:
             logger.error("Chat inference error: %s", err)
             return ""
