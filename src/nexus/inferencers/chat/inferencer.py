@@ -1,14 +1,15 @@
 import logging
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Union
 
 from openai import OpenAI
-from openai.types.chat.chat_completion import ChatCompletion, Choice
-from openai.types.chat.chat_completion_audio_param import ChatCompletionAudioParam
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
-from openai.types.chat.chat_completion_tool_union_param import (
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionAudioParam,
+    ChatCompletionMessage,
+    ChatCompletionMessageParam,
     ChatCompletionToolUnionParam,
 )
+from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage
 
 logger = logging.getLogger(__name__)
@@ -21,8 +22,8 @@ class Inferencer:
 
     def __init__(
         self,
-        base_url: str,
         api_key: str,
+        base_url: Optional[str] = None,
     ):
         """
         初始化 Chat 推理器。
@@ -40,7 +41,7 @@ class Inferencer:
         tools: List[ChatCompletionToolUnionParam] = [],
         frequency_penalty: Optional[float] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        max_tokens: int = 64,
         stream: bool = False,
     ):
 
@@ -58,14 +59,15 @@ class Inferencer:
             return response
         except Exception as err:
             logger.error("Chat inference error: %s", err)
+            raise
             return ""
 
     def chat_stream(
         self,
-        messages: list[dict],
+        messages: List[ChatCompletionMessageParam],
         model: str,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
+        temperature: Optional[float] = None,
+        max_tokens: int = 64,
         **kwargs,
     ) -> Iterator[str]:
         """
@@ -78,20 +80,16 @@ class Inferencer:
         :return: 生成器，逐步返回模型生成的文本片段
         """
         try:
-            params = {
-                "model": model,
-                "messages": messages,
-                "stream": True,
-            }
-            if temperature is not None:
-                params["temperature"] = temperature
-            if max_tokens is not None:
-                params["max_tokens"] = max_tokens
-            params.update(kwargs)
+            stream_resp = self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs
+            )
 
-            stream = self.client.chat.completions.create(**params)
-
-            for chunk in stream:
+            for chunk in stream_resp:
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
                     yield delta.content

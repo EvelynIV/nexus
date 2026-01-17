@@ -7,12 +7,14 @@ import logging
 import typer
 import uvicorn
 from fastapi import FastAPI
-
+from pathlib import Path
 from nexus.api.v1 import chat as chat_api
 from nexus.api.v1 import depends
 from nexus.api.v1 import realtime as realtime_api
 from nexus.api.v1 import transcribe as transcribe_api
 from nexus.api.v1 import tts as tts_api
+from omegaconf import OmegaConf, ListConfig
+from nexus.configs.config import NexusConfig
 
 app = typer.Typer(
     name="nexus",
@@ -24,21 +26,25 @@ logger = logging.getLogger(__name__)
 
 
 def create_fastapi_app(
-    grpc_addr: str,
-    chat_base_url: str,
-    chat_api_key: str,
-    tts_base_url: str,
-    tts_api_key: str,
-    interim_results: bool = False,
+    engine_config: NexusConfig,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
     # 配置 gRPC 地址
-    transcribe_api.configure(grpc_addr=grpc_addr, interim_results=interim_results)
-    realtime_api.configure(grpc_addr=grpc_addr, interim_results=interim_results)
+    transcribe_api.configure(
+        grpc_addr=engine_config.asr_grpc_addr,
+        interim_results=engine_config.asr_interim_results,
+    )
+    realtime_api.configure(
+        engine_config=engine_config,
+    )
     # 配置 Chat API
-    depends.configure_chat(base_url=chat_base_url, api_key=chat_api_key)
+    depends.configure_chat(
+        base_url=engine_config.chat_base_url, api_key=engine_config.chat_api_key
+    )
     # 配置 TTS API
-    tts_api.configure(base_url=tts_base_url, api_key=tts_api_key)
+    tts_api.configure(
+        base_url=engine_config.tts_base_url, api_key=engine_config.tts_api_key
+    )
 
     fastapi_app = FastAPI(
         title="Nexus ASR API",
@@ -61,56 +67,21 @@ def create_fastapi_app(
 
 @app.command()
 def serve(
-    grpc_addr: str = typer.Option(
-        "localhost:50051",
-        "--grpc-addr",
-        "-g",
-        help="gRPC ASR 服务地址",
-        envvar="NEXUS_GRPC_ADDR",
-    ),
-    interim_results: bool = typer.Option(
-        False,
-        "--interim-results/--no-interim-results",
-        help="是否启用中间结果返回",
-        envvar="NEXUS_INTERIM_RESULTS",
-    ),
-    # Chat API 参数
-    chat_base_url: str = typer.Option(
-        "http://localhost:8080/v1",
-        "--chat-base-url",
-        help="Chat 后端 API 地址",
-        envvar="NEXUS_CHAT_BASE_URL",
-    ),
-    chat_api_key: str = typer.Option(
-        "no-key",
-        "--chat-api-key",
-        help="Chat 后端 API 密钥",
-        envvar="NEXUS_CHAT_API_KEY",
-    ),
-    # TTS API 参数
-    tts_base_url: str = typer.Option(
-        "http://localhost:8080/v1",
-        "--tts-base-url",
-        help="TTS 后端 API 地址",
-        envvar="NEXUS_TTS_BASE_URL",
-    ),
-    tts_api_key: str = typer.Option(
-        "no-key",
-        "--tts-api-key",
-        help="TTS 后端 API 密钥",
-        envvar="NEXUS_TTS_API_KEY",
+    engine_config: Path = typer.Argument(
+        ...,
+        help="引擎配置文件路径 (YAML 格式)",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        envvar="NEXUS_ENGINE_CONFIG",
     ),
     log_level: str = typer.Option(
         "info",
-        "--log-level",
-        "-l",
         help="日志级别 (debug, info, warning, error)",
         envvar="NEXUS_LOG_LEVEL",
     ),
     host: str = typer.Option(
         "0.0.0.0",
-        "--host",
-        "-h",
         help="HTTP 服务监听地址",
         envvar="NEXUS_HOST",
     ),
@@ -121,22 +92,18 @@ def serve(
         help="HTTP 服务监听端口",
         envvar="NEXUS_PORT",
     ),
-    # 🔐 新增 SSL 参数
-    ssl_certfile: str = typer.Option(
+    ssl_certfile: Path = typer.Option(
         None,
-        "--ssl-certfile",
         help="SSL 证书文件路径 (server.crt)",
         envvar="NEXUS_SSL_CERTFILE",
     ),
-    ssl_keyfile: str = typer.Option(
+    ssl_keyfile: Path = typer.Option(
         None,
-        "--ssl-keyfile",
         help="SSL 私钥文件路径 (server.key)",
         envvar="NEXUS_SSL_KEYFILE",
     ),
-    ssl_ca_certs: str = typer.Option(
+    ssl_ca_certs: Path = typer.Option(
         None,
-        "--ssl-ca-certs",
         help="CA 证书链文件（可选）",
         envvar="NEXUS_SSL_CA_CERTS",
     ),
@@ -151,20 +118,17 @@ def serve(
     )
 
     logger.info(f"Starting Nexus API server on {host}:{port}")
-    logger.info(f"gRPC ASR backend: {grpc_addr}")
-    logger.info(f"Chat backend: {chat_base_url}")
-    logger.info(f"TTS backend: {tts_base_url}")
+    logger.info(f"using engine config: {engine_config}")
     logger.info(
         f"ssl_certfile: {ssl_certfile}, ssl_keyfile: {ssl_keyfile}, ssl_ca_certs: {ssl_ca_certs}"
     )
-    # 创建 FastAPI 应用
+
+    engine_config: ListConfig = OmegaConf.load(engine_config)
+    engine_config = OmegaConf.to_container(engine_config, resolve=True)
+    engine_config = NexusConfig(**engine_config)
+
     fastapi_app = create_fastapi_app(
-        grpc_addr=grpc_addr,
-        chat_base_url=chat_base_url,
-        chat_api_key=chat_api_key,
-        tts_base_url=tts_base_url,
-        tts_api_key=tts_api_key,
-        interim_results=interim_results,
+        engine_config=engine_config,
     )
 
     # 启动 uvicorn

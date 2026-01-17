@@ -32,9 +32,14 @@ def request_iter(
 @dataclass
 class TranscriptionResult:
     transcript: str
-    words: str
-    start_time: float
-    end_time: float
+    is_final: bool
+    words: List[Tuple[str, float, float]] = None  # [(word, start_time, end_time), ...]
+    
+    def get_end_time(self) -> float:
+        """获取最后一个词的结束时间戳"""
+        if self.words and len(self.words) > 0:
+            return self.words[-1][2]  # end_time of last word
+        return 0.0
 
 
 class Inferencer:
@@ -101,7 +106,19 @@ class Inferencer:
                     is_final = result.is_final
                     if not interim_results and not is_final:
                         continue
-                    yield (transcript, is_final)
+                    
+                    # 解析词级时间戳
+                    words = []
+                    for word_info in alternative.words:
+                        start_time = word_info.start_time.seconds + word_info.start_time.nanos / 1e9
+                        end_time = word_info.end_time.seconds + word_info.end_time.nanos / 1e9
+                        words.append((word_info.word, start_time, end_time))
+                    
+                    yield TranscriptionResult(
+                        transcript=transcript,
+                        is_final=is_final,
+                        words=words if words else None
+                    )
         except grpc.RpcError as err:
             logger.error("gRPC error during ASR inference: %s", err)
         except Exception as err:
