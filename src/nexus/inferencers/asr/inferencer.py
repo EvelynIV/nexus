@@ -12,19 +12,34 @@ from nexus.protos.asr import ux_speech_pb2_grpc as pb2_grpc
 logger = logging.getLogger(__name__)
 
 
-def request_iter(streaming_config, audio_iterator):
+def request_iter(
+    streaming_config, audio_iterator, chunk_size: int = 3200
+) -> Iterator[pb2.StreamingRecognizeRequest]:
     yield pb2.StreamingRecognizeRequest(streaming_config=streaming_config)
+    buffer = np.array([], dtype=np.int16)
     for audio_chunk in audio_iterator:
-        audio_bytes = audio_chunk.tobytes()
+        buffer = np.concatenate((buffer, audio_chunk))
+        while len(buffer) >= chunk_size:  # since dtype=np.int16, 2 bytes per sample
+            chunk = buffer[:chunk_size]
+            buffer = buffer[chunk_size:]
+            audio_bytes = chunk.tobytes()
+            yield pb2.StreamingRecognizeRequest(audio_content=audio_bytes)
+    if len(buffer) > 0:
+        audio_bytes = buffer.tobytes()
         yield pb2.StreamingRecognizeRequest(audio_content=audio_bytes)
 
 
 @dataclass
 class TranscriptionResult:
     transcript: str
-    words: str
-    start_time: float
-    end_time: float
+    is_final: bool
+    words: List[Tuple[str, float, float]] = None  # [(word, start_time, end_time), ...]
+    
+    def get_end_time(self) -> float:
+        """获取最后一个词的结束时间戳"""
+        if self.words and len(self.words) > 0:
+            return self.words[-1][2]  # end_time of last word
+        return 0.0
 
 
 class Inferencer:
@@ -50,6 +65,7 @@ class Inferencer:
         enable_automatic_punctuation: bool = True,
         hotwords: Optional[List[str]] = None,
         hotword_bias: float = 0.0,
+        interim_results: bool = True,
     ) -> Generator[Tuple[str, bool], None, None]:
         """
         执行一次性离线语音识别。
@@ -61,6 +77,7 @@ class Inferencer:
         :param enable_automatic_punctuation: 是否启用自动标点
         :param hotwords: 热词列表
         :param hotword_bias: 热词偏置
+        :param interim_results: 是否启用中间结果返回
         :return: 生成器，返回 (文本, is_final) 元组。is_final=True 表示最终结果，False 表示中间结果
         """
         hotwords = hotwords or []
@@ -74,7 +91,7 @@ class Inferencer:
                 hotwords=hotwords,
                 hotword_bias=hotword_bias,
             ),
-            interim_results=True,
+            interim_results=interim_results,
         )
 
         try:
@@ -87,7 +104,21 @@ class Inferencer:
                     alternative = result.alternative
                     transcript = alternative.transcript
                     is_final = result.is_final
-                    yield (transcript, is_final)
+                    if not interim_results and not is_final:
+                        continue
+                    
+                    # 解析词级时间戳
+                    words = []
+                    for word_info in alternative.words:
+                        start_time = word_info.start_time.seconds + word_info.start_time.nanos / 1e9
+                        end_time = word_info.end_time.seconds + word_info.end_time.nanos / 1e9
+                        words.append((word_info.word, start_time, end_time))
+                    
+                    yield TranscriptionResult(
+                        transcript=transcript,
+                        is_final=is_final,
+                        words=words if words else None
+                    )
         except grpc.RpcError as err:
             logger.error("gRPC error during ASR inference: %s", err)
         except Exception as err:
