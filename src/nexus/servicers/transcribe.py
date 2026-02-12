@@ -10,7 +10,7 @@ from typing import Generator, Iterator, List, Optional
 
 import numpy as np
 
-from nexus.inferencers.asr.inferencer import Inferencer
+from nexus.inferencers.asr.inferencer import Inferencer, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,15 @@ class TranscribeService:
     封装 gRPC Inferencer 调用，处理音频数据格式转换
     """
 
-    def __init__(self, grpc_addr: str):
+    def __init__(self, grpc_addr: str, interim_results: bool = False):
         """
         初始化转录服务
 
         :param grpc_addr: gRPC 服务器地址 (host:port)
+        :param interim_results: 是否启用中间结果返回
         """
         self.grpc_addr = grpc_addr
+        self.interim_results = interim_results
 
     def _pcm_to_chunks(
         self, pcm_data: bytes, chunk_size: int = 3200
@@ -73,14 +75,15 @@ class TranscribeService:
         with Inferencer(self.grpc_addr) as inferencer:
             audio_iter = self._pcm_to_chunks(pcm_data)
 
-            for transcript, is_final in inferencer.transcribe(
+            for result in inferencer.transcribe(
                 audio=audio_iter,
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
+                interim_results=self.interim_results,
             ):
-                if is_final:
-                    transcripts.append(transcript)
+                if result.is_final:
+                    transcripts.append(result.transcript)
 
         full_text = "".join(transcripts)
         return TranscriptionResult(text=full_text, language=language)
@@ -104,14 +107,15 @@ class TranscribeService:
         with Inferencer(self.grpc_addr) as inferencer:
             audio_iter = self._pcm_to_chunks(pcm_data)
 
-            for transcript, is_final in inferencer.transcribe(
+            for result in inferencer.transcribe(
                 audio=audio_iter,
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
+                interim_results=self.interim_results,
             ):
-                if transcript:
-                    yield transcript
+                if result.transcript:
+                    yield result.transcript
 
     def transcribe_base64(
         self,
