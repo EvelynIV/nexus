@@ -1,7 +1,7 @@
 from typing import Iterable, Optional
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from openai.types import realtime
@@ -34,30 +34,158 @@ def get_usage_tokens(transcript: str):
     return usage
 
 
+# ---------------------------------------------------------------------------
+# TranscriptionStreamTracker – 追踪流式转写状态，从累积字符串中提取增量 delta
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TranscriptionStreamTracker:
+    """Tracks incremental transcription state across interim ASR results.
+
+    ASR 引擎每次返回累积后的完整字符串（如 "今天的" → "今天的天气真" → "今天的天气真好"），
+    本类负责从中提取真正的增量 delta（"今天的" / "天气真" / "好"），
+    以符合 OpenAI Realtime API 的 conversation.item.input_audio_transcription.delta 语义。
+    """
+
+    _previous_transcript: str = field(default="", init=False)
+    _item_id: Optional[str] = field(default=None, init=False)
+    _speech_started_sent: bool = field(default=False, init=False)
+
+    @property
+    def item_id(self) -> str:
+        """当前语句的 item_id，首次访问时自动分配。"""
+        if self._item_id is None:
+            self._item_id = item_id()
+        return self._item_id
+
+    @property
+    def speech_started_sent(self) -> bool:
+        return self._speech_started_sent
+
+    def mark_speech_started(self) -> None:
+        self._speech_started_sent = True
+
+    def compute_delta(self, current_transcript: str) -> str:
+        """Compute the incremental delta from the previous transcript.
+
+        If *current_transcript* starts with the previous accumulated string,
+        return the new suffix.  Otherwise (ASR corrected earlier text) fall
+        back to returning the full *current_transcript* and log a warning.
+        """
+        prev = self._previous_transcript
+        if current_transcript.startswith(prev):
+            delta = current_transcript[len(prev):]
+        else:
+            # ASR 纠正了之前的识别结果，回退到完整文本
+            logger.warning(
+                "ASR transcript not a prefix extension (prev=%r, cur=%r); "
+                "sending full transcript as delta",
+                prev,
+                current_transcript,
+            )
+            delta = current_transcript
+        self._previous_transcript = current_transcript
+        return delta
+
+    def reset(self) -> None:
+        """Reset state after a final result, ready for the next utterance."""
+        self._previous_transcript = ""
+        self._item_id = None
+        self._speech_started_sent = False
+
+
+# ---------------------------------------------------------------------------
+# send_transcribe_interim – 处理 is_final=False 的中间 ASR 结果
+# ---------------------------------------------------------------------------
+
+async def send_transcribe_interim(
+    session: "RealtimeSessionState",
+    transcription_result: TranscriptionResult,
+    tracker: TranscriptionStreamTracker,
+) -> None:
+    """Send streaming delta events for an interim (non-final) ASR result."""
+
+    # 首次收到 interim 结果时立即发送 speech_started（低延迟）
+    if not tracker.speech_started_sent:
+        if transcription_result.words:
+            _, start_time, _ = transcription_result.words[0]
+        else:
+            start_time = 0.0
+        vad_start_event = realtime.InputAudioBufferSpeechStartedEvent(
+            audio_start_ms=int(start_time * 1000),
+            type="input_audio_buffer.speech_started",
+            event_id=event_id(),
+            item_id=tracker.item_id,
+        )
+        await session.send_event(vad_start_event)
+        tracker.mark_speech_started()
+
+    # 计算增量 delta
+    delta = tracker.compute_delta(transcription_result.transcript)
+    if not delta:
+        return
+
+    delta_event = realtime.ConversationItemInputAudioTranscriptionDeltaEvent(
+        event_id=event_id(),
+        item_id=tracker.item_id,
+        type="conversation.item.input_audio_transcription.delta",
+        content_index=0,
+        delta=delta,
+    )
+    await session.send_event(delta_event)
+    logger.debug("Sent interim delta: item_id=%s, delta=%r", tracker.item_id, delta)
+
+
+# ---------------------------------------------------------------------------
+# send_transcribe_response – 处理 is_final=True 的最终 ASR 结果（重构后）
+# ---------------------------------------------------------------------------
+
 async def send_transcribe_response(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
+    tracker: Optional[TranscriptionStreamTracker] = None,
 ):
-    response_item_id = item_id()
+    """Complete the transcription event sequence for a final ASR result.
+
+    When *tracker* is provided the function cooperates with prior interim
+    deltas: it reuses the same ``item_id``, skips ``speech_started`` if
+    already sent, and only emits the remaining delta.
+
+    When *tracker* is ``None`` (backward-compat / non-interim mode) the
+    function behaves like the original – sends the full transcript in a
+    single delta event.
+    """
     is_final = transcription_result.is_final
     if not is_final:
         logger.warning(
-            "send_transcribe_response called with non-final result, item_id=%s",
-            response_item_id,
+            "send_transcribe_response called with non-final result",
         )
         return
+
     transcript = transcription_result.transcript
+
+    # Determine item_id – reuse from tracker if available
+    if tracker is not None:
+        response_item_id = tracker.item_id
+    else:
+        response_item_id = item_id()
+
     if transcription_result.words:
         _, start_time, end_time = transcription_result.words[0]
     else:
         start_time = end_time = 0.0
-    vad_start_event = realtime.InputAudioBufferSpeechStartedEvent(
-        audio_start_ms=int(start_time * 1000),
-        type="input_audio_buffer.speech_started",
-        event_id=event_id(),
-        item_id=response_item_id,
-    )
-    await session.send_event(vad_start_event)
+
+    # speech_started – only send if not already sent by interim handler
+    if tracker is None or not tracker.speech_started_sent:
+        vad_start_event = realtime.InputAudioBufferSpeechStartedEvent(
+            audio_start_ms=int(start_time * 1000),
+            type="input_audio_buffer.speech_started",
+            event_id=event_id(),
+            item_id=response_item_id,
+        )
+        await session.send_event(vad_start_event)
+
+    # speech_stopped
     vad_stop_event = realtime.InputAudioBufferSpeechStoppedEvent(
         audio_end_ms=int(end_time * 1000),
         type="input_audio_buffer.speech_stopped",
@@ -65,20 +193,31 @@ async def send_transcribe_response(
         item_id=response_item_id,
     )
     await session.send_event(vad_stop_event)
+
+    # committed
     committed_event = realtime.InputAudioBufferCommittedEvent(
         event_id=event_id(),
         item_id=response_item_id,
         type="input_audio_buffer.committed",
     )
     await session.send_event(committed_event)
-    delta_event = realtime.ConversationItemInputAudioTranscriptionDeltaEvent(
-        event_id=event_id(),
-        item_id=response_item_id,
-        type="conversation.item.input_audio_transcription.delta",
-        content_index=0,
-        delta=transcript,
-    )
-    await session.send_event(delta_event)
+
+    # Final delta – send remaining increment (or full transcript in legacy mode)
+    if tracker is not None:
+        delta = tracker.compute_delta(transcript)
+    else:
+        delta = transcript
+    if delta:
+        delta_event = realtime.ConversationItemInputAudioTranscriptionDeltaEvent(
+            event_id=event_id(),
+            item_id=response_item_id,
+            type="conversation.item.input_audio_transcription.delta",
+            content_index=0,
+            delta=delta,
+        )
+        await session.send_event(delta_event)
+
+    # completed
     completed_event = realtime.ConversationItemInputAudioTranscriptionCompletedEvent(
         content_index=0,
         event_id=event_id(),
@@ -109,6 +248,10 @@ async def send_transcribe_response(
     await session.send_event(conversation_done_event)
 
     logger.info("Sent transcription response: item_id=%s, is_final=%s", response_item_id, is_final)
+
+    # Reset tracker for the next utterance
+    if tracker is not None:
+        tracker.reset()
 
 
 @dataclass
