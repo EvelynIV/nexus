@@ -11,7 +11,9 @@ from openai.types.realtime import (
     RealtimeConversationItemFunctionCall,
     RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
+    ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
+    ResponseAudioTranscriptDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     ResponseOutputItemAddedEvent,
@@ -92,23 +94,29 @@ def build_error_event(error_type: str, message: str) -> dict:
 
 def build_response_audio_delta(
     response_id: str, item_id: str, audio_delta: str
-) -> dict:
+) -> ResponseAudioDeltaEvent:
     """构建 response.output_audio.delta 事件"""
-    return {
-        "type": "response.output_audio.delta",
-        "response_id": "0",
-        "item_id": "0",
-        "delta": audio_delta,
-    }
+    return ResponseAudioDeltaEvent(
+        content_index=0,
+        delta=audio_delta,
+        event_id=str(uuid.uuid4()),
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        type="response.output_audio.delta",
+    )
 
 
-def build_response_audio_done(response_id: str, item_id: str) -> dict:
+def build_response_audio_done(response_id: str, item_id: str) -> ResponseAudioDoneEvent:
     """构建 response.output_audio.done 事件"""
-    return {
-        "type": "response.output_audio.done",
-        "response_id": "0",
-        "item_id": "0",
-    }
+    return ResponseAudioDoneEvent(
+        content_index=0,
+        event_id=str(uuid.uuid4()),
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        type="response.output_audio.done",
+    )
 
 
 def build_response_done(response_id: str) -> dict:
@@ -427,6 +435,80 @@ def build_text_done_event(
     )
 
 
+def build_audio_delta_event(
+    *,
+    delta: str,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+) -> ResponseAudioDeltaEvent:
+    """构建 response.output_audio.delta 事件"""
+    return ResponseAudioDeltaEvent(
+        content_index=0,
+        delta=delta,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        type="response.output_audio.delta",
+    )
+
+
+def build_audio_done_event(
+    *,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+) -> ResponseAudioDoneEvent:
+    """构建 response.output_audio.done 事件"""
+    return ResponseAudioDoneEvent(
+        content_index=0,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        type="response.output_audio.done",
+    )
+
+
+def build_audio_transcript_delta_event(
+    *,
+    delta: str,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+) -> ResponseAudioTranscriptDeltaEvent:
+    """构建 response.output_audio_transcript.delta 事件"""
+    return ResponseAudioTranscriptDeltaEvent(
+        content_index=0,
+        delta=delta,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        type="response.output_audio_transcript.delta",
+    )
+
+
+def build_audio_transcript_done_event(
+    *,
+    transcript: str,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+) -> ResponseAudioTranscriptDoneEvent:
+    """构建 response.output_audio_transcript.done 事件"""
+    return ResponseAudioTranscriptDoneEvent(
+        content_index=0,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        response_id=response_id,
+        transcript=transcript,
+        type="response.output_audio_transcript.done",
+    )
+
+
 def build_content_part_done_event(
     text: str,
     item_id: str,
@@ -444,6 +526,53 @@ def build_content_part_done_event(
             text=text,
             transcript=None,
             type="text",
+        ),
+        response_id=response_id,
+        type="response.content_part.done",
+    )
+
+
+def build_audio_content_part_added_event(
+    *,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+) -> ResponseContentPartAddedEvent:
+    """构建 audio response.content_part.added 事件"""
+    return ResponseContentPartAddedEvent(
+        content_index=0,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        part=response_content_part_added_event.Part(
+            audio="",
+            text=None,
+            transcript=None,
+            type="audio",
+        ),
+        response_id=response_id,
+        type="response.content_part.added",
+    )
+
+
+def build_audio_content_part_done_event(
+    *,
+    item_id: str,
+    response_id: str,
+    event_id: str,
+    transcript: Optional[str],
+) -> ResponseContentPartDoneEvent:
+    """构建 audio response.content_part.done 事件"""
+    return ResponseContentPartDoneEvent(
+        content_index=0,
+        event_id=event_id,
+        item_id=item_id,
+        output_index=0,
+        part=response_content_part_done_event.Part(
+            audio=None,
+            text=None,
+            transcript=transcript,
+            type="audio",
         ),
         response_id=response_id,
         type="response.content_part.done",

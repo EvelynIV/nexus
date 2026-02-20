@@ -21,7 +21,7 @@ class CreateSpeechRequest(BaseModel):
     input: str = Field(..., description="Input text", max_length=4096)
     voice: str = Field(default="alloy", description="Voice")
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = Field(
-        default="mp3", description="Audio response format"
+        default="wav", description="Audio response format"
     )
     speed: float = Field(default=1.0, ge=0.25, le=4.0, description="Playback speed")
 

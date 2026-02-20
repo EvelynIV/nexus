@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Iterator
 
 from nexus.infrastructure.tts import Inferencer
 
@@ -11,7 +11,7 @@ class TextToSpeechUseCase:
     base_url: str
     api_key: str
 
-    def stream_audio(
+    async def stream_audio(
         self,
         *,
         text: str,
@@ -19,12 +19,16 @@ class TextToSpeechUseCase:
         voice: str,
         response_format: str,
         speed: float,
-    ) -> Iterator[bytes]:
+    ) -> AsyncIterator[bytes]:
         inferencer = Inferencer(base_url=self.base_url, api_key=self.api_key)
-        return inferencer.speech_stream(
-            input=text,
-            model=model,
-            voice=voice,
-            response_format=response_format,
-            speed=speed,
-        )
+        try:
+            async for chunk in inferencer.speech_stream(
+                input=text,
+                model=model,
+                voice=voice,
+                response_format=response_format,
+                speed=speed,
+            ):
+                yield chunk
+        finally:
+            await inferencer.close()

@@ -10,6 +10,7 @@ from openai.types.chat import ChatCompletionChunk
 from nexus.infrastructure.asr import TranscriptionResult
 from nexus.application.realtime.protocol.ids import event_id, item_id
 from nexus.application.realtime.emitters.response_contexts import (
+    AudioResponseContext,
     FunctionCallResponseContext,
     McpCallResponseContext,
     TextResponseContext,
@@ -17,6 +18,7 @@ from nexus.application.realtime.emitters.response_contexts import (
 
 if TYPE_CHECKING:
     from nexus.domain.realtime import RealtimeSessionState
+    from nexus.infrastructure.tts import Inferencer as TTSInferencer
 
 logger = logging.getLogger(__name__)
 
@@ -281,9 +283,23 @@ class ChatStreamResult:
         return self.tool_call is not None and self.tool_call.is_mcp
 
 
+def _modalities_or_default(modalities: Optional[list[str]]) -> list[str]:
+    return list(modalities) if modalities else ["text"]
+
+
+def _is_audio_mode(modalities: list[str]) -> bool:
+    return "audio" in modalities
+
+
 async def process_chat_stream(
     session: "RealtimeSessionState",
     chat_stream: Iterable[ChatCompletionChunk],
+    *,
+    modalities: Optional[list[str]] = None,
+    tts_inferencer: Optional["TTSInferencer"] = None,
+    audio_output_format_type: str = "audio/pcm",
+    audio_output_voice: str = "alloy",
+    audio_output_speed: float = 1.0,
 ) -> ChatStreamResult:
     """
     处理 chat 流式响应，同时流式发送文本给客户端。
@@ -317,8 +333,12 @@ async def process_chat_stream(
     7. ResponseOutputItemDoneEvent
     8. ResponseDoneEvent
     """
+    active_modalities = _modalities_or_default(modalities)
+    audio_mode = _is_audio_mode(active_modalities)
+
     result = ChatStreamResult()
     text_ctx: Optional[TextResponseContext] = None
+    audio_ctx: Optional[AudioResponseContext] = None
     func_ctx: Optional[FunctionCallResponseContext] = None
     mcp_ctx: Optional[McpCallResponseContext] = None
     
@@ -357,6 +377,7 @@ async def process_chat_stream(
                             session=session,
                             name=tool_name,
                             server_label=mcp_server_label,
+                            modalities=active_modalities,
                         )
                         await mcp_ctx.__aenter__()
                         if function.arguments:
@@ -367,6 +388,7 @@ async def process_chat_stream(
                             session=session,
                             name=tool_name,
                             call_id=tool_call_id,
+                            modalities=active_modalities,
                         )
                         await func_ctx.__aenter__()
                         if function.arguments:
@@ -380,13 +402,28 @@ async def process_chat_stream(
             
             # 🚀 流式发送文本内容
             if delta.content:
-                # 延迟创建上下文，在第一个文本到达时才发送前置事件
-                if text_ctx is None:
-                    text_ctx = TextResponseContext(session)
-                    await text_ctx.__aenter__()
-                
                 result.content += delta.content
-                await text_ctx.send_text_delta(delta.content)
+
+                if audio_mode:
+                    if audio_ctx is None:
+                        if tts_inferencer is None:
+                            raise RuntimeError("TTS inferencer is not configured for audio output")
+                        audio_ctx = AudioResponseContext(
+                            session,
+                            tts_inferencer=tts_inferencer,
+                            modalities=active_modalities,
+                            format_type=audio_output_format_type,
+                            voice=audio_output_voice,
+                            speed=audio_output_speed,
+                        )
+                        await audio_ctx.__aenter__()
+                    await audio_ctx.add_model_text_delta(delta.content)
+                else:
+                    # 延迟创建上下文，在第一个文本到达时才发送前置事件
+                    if text_ctx is None:
+                        text_ctx = TextResponseContext(session, modalities=active_modalities)
+                        await text_ctx.__aenter__()
+                    await text_ctx.send_text_delta(delta.content)
         
         # 流结束后，如果有工具调用，记录结果
         if mcp_ctx and tool_call_id:
@@ -435,6 +472,33 @@ async def process_chat_stream(
     
     finally:
         # 确保上下文正确关闭，发送后置事件
+        audio_synthesis_error: Optional[Exception] = None
+        if audio_ctx is not None:
+            should_synthesize = (
+                not result.was_cancelled
+                and not result.has_tool_call
+                and bool(result.content.strip())
+            )
+            if should_synthesize:
+                try:
+                    await audio_ctx.synthesize_audio()
+                except Exception as exc:  # pragma: no cover - defensive boundary
+                    audio_synthesis_error = exc
+                    logger.error("Audio synthesis failed: %s", exc)
+
+            await audio_ctx.finish(
+                cancelled=result.was_cancelled,
+                failed=audio_synthesis_error is not None,
+                error_code="audio_synthesis_failed" if audio_synthesis_error else None,
+                error_type="server_error" if audio_synthesis_error else None,
+            )
+            if audio_synthesis_error and hasattr(session, "writer"):
+                await session.writer.send_error(
+                    message=f"Audio synthesis failed: {audio_synthesis_error}",
+                    error_type="server_error",
+                    code="audio_synthesis_failed",
+                )
+
         if text_ctx is not None:
             await text_ctx.finish(cancelled=result.was_cancelled)
         if func_ctx is not None:
@@ -462,18 +526,28 @@ async def process_chat_stream(
 async def send_tool_result_response(
     session: "RealtimeSessionState",
     chat_stream: Iterable[ChatCompletionChunk],
+    *,
+    modalities: Optional[list[str]] = None,
+    tts_inferencer: Optional["TTSInferencer"] = None,
+    audio_output_format_type: str = "audio/pcm",
+    audio_output_voice: str = "alloy",
+    audio_output_speed: float = 1.0,
 ):
     """
     发送工具调用结果后的响应流。
-    使用 TextResponseContext 发送完整的事件序列（包括 response.created 等前置事件）。
+    使用与主对话一致的响应上下文发送完整事件序列。
     """
-    async with TextResponseContext(session) as ctx:
-        async for chunk in chat_stream:
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                await ctx.send_text_delta(delta.content)
-    
-    logger.info(f"Tool result response sent: content='{ctx.content}'")
+    result = await process_chat_stream(
+        session=session,
+        chat_stream=chat_stream,
+        modalities=modalities,
+        tts_inferencer=tts_inferencer,
+        audio_output_format_type=audio_output_format_type,
+        audio_output_voice=audio_output_voice,
+        audio_output_speed=audio_output_speed,
+    )
+
+    logger.info("Tool result response sent: content='%s'", result.content)
 
 
 async def send_text_response(session: "RealtimeSessionState", content: str):

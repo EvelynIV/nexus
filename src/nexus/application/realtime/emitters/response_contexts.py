@@ -3,11 +3,14 @@
 
 提供用于管理响应生命周期的上下文管理器，自动处理前置/后置事件发送。
 """
-from typing import List, TYPE_CHECKING, Dict, Any
+import base64
 import logging
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from openai.types.realtime import McpListToolsFailed, ResponseMcpCallFailed
 
+from nexus.application.realtime.orchestrators.tts_orchestrator import stream_tts_audio_for_text
+from nexus.infrastructure.tts.resampler import StreamingResampler
 from nexus.application.realtime.protocol.ids import (
     event_id,
     item_id,
@@ -25,6 +28,12 @@ from .event_factory import (
     build_text_delta_event,
     build_text_done_event,
     build_content_part_done_event,
+    build_audio_content_part_added_event,
+    build_audio_content_part_done_event,
+    build_audio_delta_event,
+    build_audio_done_event,
+    build_audio_transcript_delta_event,
+    build_audio_transcript_done_event,
     build_conversation_item_done_event,
     build_output_item_done_event,
     build_function_call_item,
@@ -53,6 +62,7 @@ from .event_factory import (
 
 if TYPE_CHECKING:
     from nexus.domain.realtime import RealtimeSessionState
+    from nexus.infrastructure.tts import Inferencer as TTSInferencer
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +253,292 @@ class TextResponseContext:
                 response_id=self.response_id,
                 event_id=event_id(),
             )
+        )
+
+
+class AudioResponseContext:
+    """音频响应上下文管理器（支持 output_audio_transcript 事件）。"""
+
+    # 上游 TTS 服务的原始采样率
+    TTS_INPUT_SAMPLE_RATE = 48000
+    # Realtime 协议要求的输出采样率
+    REALTIME_OUTPUT_SAMPLE_RATE = 24000
+
+    def __init__(
+        self,
+        session: "RealtimeSessionState",
+        *,
+        tts_inferencer: "TTSInferencer",
+        modalities: List[str] | None = None,
+        format_type: str = "audio/pcm",
+        voice: str = "alloy",
+        speed: float = 1.0,
+        min_segment_chars: int = 30,
+        segment_concurrency: int = 3,
+        tts_sample_rate: int | None = None,
+        output_sample_rate: int | None = None,
+    ):
+        self.session = session
+        self.tts_inferencer = tts_inferencer
+        self.modalities = modalities or ["audio"]
+        self.format_type = format_type
+        self.voice = voice
+        self.speed = speed
+        self.min_segment_chars = min_segment_chars
+        self.segment_concurrency = segment_concurrency
+
+        self.item_id = item_id()
+        self.response_id = response_id()
+        self.conversation_id = conversation_id()
+
+        self._content = ""
+        self._item = None
+        self._audio_delta_count = 0
+
+        # 流式重采样：当上游 TTS 采样率与输出不一致时启用
+        _in_rate = tts_sample_rate or self.TTS_INPUT_SAMPLE_RATE
+        _out_rate = output_sample_rate or self.REALTIME_OUTPUT_SAMPLE_RATE
+        if _in_rate != _out_rate:
+            self._resampler: StreamingResampler | None = StreamingResampler(
+                input_rate=_in_rate,
+                output_rate=_out_rate,
+            )
+            logger.info(
+                "AudioResponseContext: streaming resampler enabled %dHz -> %dHz",
+                _in_rate,
+                _out_rate,
+            )
+        else:
+            self._resampler = None
+
+    @property
+    def include_transcript(self) -> bool:
+        # audio modality always carries transcript events in this service.
+        return True
+
+    @property
+    def content(self) -> str:
+        return self._content
+
+    async def __aenter__(self) -> "AudioResponseContext":
+        await self.session.send_event(
+            build_response_created_event(
+                response_id=self.response_id,
+                conversation_id=self.conversation_id,
+                event_id=event_id(),
+                modalities=self.modalities,
+            )
+        )
+
+        self._item = build_assistant_message_item(item_id=self.item_id, status="in_progress")
+        await self.session.send_event(
+            build_output_item_added_event(
+                item=self._item,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+        await self.session.send_event(
+            build_conversation_item_added_event(
+                item=self._item,
+                event_id=event_id(),
+            )
+        )
+        await self.session.send_event(
+            build_audio_content_part_added_event(
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.finish(cancelled=False)
+        return False
+
+    async def add_model_text_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        self._content += delta
+        if not self.include_transcript:
+            return
+        await self.session.send_event(
+            build_audio_transcript_delta_event(
+                delta=delta,
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+
+    async def _send_audio_raw(self, audio_bytes: bytes) -> None:
+        """直接将音频 bytes base64 编码后发送给客户端。"""
+        if not audio_bytes:
+            return
+        delta_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        await self.session.send_event(
+            build_audio_delta_event(
+                delta=delta_b64,
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+        self._audio_delta_count += 1
+
+    async def _send_audio_bytes(self, audio_bytes: bytes) -> None:
+        """接收上游 TTS 原始音频，经流式重采样后发送。"""
+        if self._resampler is not None:
+            resampled = self._resampler.process(audio_bytes)
+            if resampled:
+                await self._send_audio_raw(resampled)
+        else:
+            await self._send_audio_raw(audio_bytes)
+
+    async def synthesize_audio(self) -> None:
+        if not self._content.strip():
+            return
+        await stream_tts_audio_for_text(
+            inferencer=self.tts_inferencer,
+            text=self._content,
+            voice=self.voice,
+            speed=self.speed,
+            format_type=self.format_type,
+            send_chunk=self._send_audio_bytes,
+            min_segment_chars=self.min_segment_chars,
+            concurrency=self.segment_concurrency,
+        )
+        # 冲刷重采样器内部滤波器缓冲区中的剩余数据
+        if self._resampler is not None:
+            tail = self._resampler.flush()
+            if tail:
+                await self._send_audio_raw(tail)
+
+    async def finish(
+        self,
+        *,
+        cancelled: bool = False,
+        failed: bool = False,
+        error_code: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        await self.session.send_event(
+            build_audio_done_event(
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+
+        if self.include_transcript:
+            await self.session.send_event(
+                build_audio_transcript_done_event(
+                    transcript=self._content,
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    event_id=event_id(),
+                )
+            )
+
+        transcript = self._content if self.include_transcript else None
+        await self.session.send_event(
+            build_audio_content_part_done_event(
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+                transcript=transcript,
+            )
+        )
+
+        item_status = "completed"
+        if cancelled or failed:
+            item_status = "incomplete"
+
+        self._item.content.append(
+            realtime_conversation_item_assistant_message.Content(
+                audio=None,
+                text=None,
+                transcript=transcript,
+                type="output_audio",
+            )
+        )
+        self._item.status = item_status
+
+        await self.session.send_event(
+            build_output_item_done_event(
+                item=self._item,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+        await self.session.send_event(
+            build_conversation_item_done_event(
+                item=self._item,
+                event_id=event_id(),
+            )
+        )
+
+        if failed:
+            await self.session.send_event(
+                build_response_done_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                    status="failed",
+                    error_code=error_code or "audio_synthesis_failed",
+                    error_type=error_type or "server_error",
+                )
+            )
+            logger.warning(
+                "AudioResponseContext failed: item_id=%s response_id=%s content_len=%s deltas=%s",
+                self.item_id,
+                self.response_id,
+                len(self._content),
+                self._audio_delta_count,
+            )
+            return
+
+        if cancelled:
+            reason = (
+                self.session.get_cancel_reason()
+                if hasattr(self.session, "get_cancel_reason")
+                else "turn_detected"
+            )
+            await self.session.send_event(
+                build_response_done_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                    status="cancelled",
+                    reason=reason,
+                )
+            )
+            logger.info(
+                "AudioResponseContext cancelled: item_id=%s response_id=%s content_len=%s deltas=%s",
+                self.item_id,
+                self.response_id,
+                len(self._content),
+                self._audio_delta_count,
+            )
+            return
+
+        await self.session.send_event(
+            build_response_done_event(
+                response_id=self.response_id,
+                conversation_id=self.conversation_id,
+                event_id=event_id(),
+                modalities=self.modalities,
+            )
+        )
+        logger.info(
+            "AudioResponseContext completed: item_id=%s response_id=%s content_len=%s deltas=%s",
+            self.item_id,
+            self.response_id,
+            len(self._content),
+            self._audio_delta_count,
         )
 
 

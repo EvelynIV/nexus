@@ -36,6 +36,9 @@ class RealtimeSessionState:
 
     sample_rate: int = 16000
     output_modalities: list[str] = field(default_factory=lambda: ["text"])
+    audio_output_format_type: str = "audio/pcm"
+    audio_output_voice: str = "alloy"
+    audio_output_speed: float = 1.0
     audio_queue: asyncio.Queue[np.ndarray] = field(default_factory=asyncio.Queue)
 
     _current_chat_task: Optional["Task"] = field(default=None, repr=False)
@@ -77,6 +80,27 @@ class RealtimeSessionState:
 
     def get_output_modalities(self) -> List[str]:
         return self.output_modalities.copy()
+
+    def update_audio_output_config(
+        self,
+        *,
+        format_type: Optional[str] = None,
+        voice: Optional[str] = None,
+        speed: Optional[float] = None,
+    ) -> None:
+        if format_type is not None:
+            self.audio_output_format_type = format_type
+        if voice is not None:
+            self.audio_output_voice = voice
+        if speed is not None:
+            self.audio_output_speed = speed
+
+    def get_audio_output_config(self) -> dict:
+        return {
+            "format_type": self.audio_output_format_type,
+            "voice": self.audio_output_voice,
+            "speed": self.audio_output_speed,
+        }
 
     def get_all_tools(self) -> List[RealtimeFunctionTool]:
         all_tools = list(self.tools)
