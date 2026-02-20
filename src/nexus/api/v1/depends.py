@@ -7,7 +7,7 @@ from typing import Annotated, Optional
 
 from fastapi import Depends
 
-from nexus.inferencers.chat.inferencer import Inferencer as ChatInferencer
+from nexus.infrastructure.chat.inferencer import Inferencer as ChatInferencer
 
 
 @dataclass

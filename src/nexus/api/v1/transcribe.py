@@ -1,7 +1,6 @@
-"""
-FastAPI 路由 - 音频转录 API
-兼容 OpenAI Whisper API 格式
-"""
+"""HTTP interface for OpenAI-compatible transcription endpoints."""
+
+from __future__ import annotations
 
 import io
 import json
@@ -12,99 +11,50 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from fastapi.responses import StreamingResponse
 from openai.types.audio import Transcription
 
-from nexus.models.transcribe import Settings, TranscriptionBase64Request
-from nexus.servicers.transcribe import TranscribeService
-
+from nexus.application.container import AppContainer, get_container
+from nexus.application.transcribe import TranscriptionBase64Request
 
 router = APIRouter(prefix="/audio", tags=["Audio"])
 
 
-# ============== 配置依赖 ==============
-
-
-_settings = Settings()
-
-
-def get_settings() -> Settings:
-    return _settings
-
-
-def configure(grpc_addr: str, interim_results: bool = False):
-    """配置全局设置"""
-    _settings.grpc_addr = grpc_addr
-    _settings.interim_results = interim_results
-
-
-def get_transcribe_service(
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> TranscribeService:
-    return TranscribeService(
-        grpc_addr=settings.grpc_addr,
-        interim_results=settings.interim_results,
-    )
-
-
-# ============== API 端点 ==============
-
-
-def _generate_sse_stream(service: TranscribeService, pcm_data: bytes, sample_rate: int, language: str):
-    """
-    生成 SSE 流式响应（兼容 OpenAI 流式格式）
-    """
-    for text in service.transcribe_pcm_stream(
+def _generate_sse_stream(use_case, pcm_data: bytes, sample_rate: int, language: str):
+    for text in use_case.transcribe_pcm_stream(
         pcm_data=pcm_data,
         sample_rate=sample_rate,
         language=language,
     ):
-        # OpenAI 兼容的流式响应格式
         event_data = {
             "type": "transcript.text.delta",
             "text": text,
         }
         yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-    
-    # 发送结束事件
     yield "data: [DONE]\n\n"
 
 
 @router.post("/transcriptions")
 async def create_transcription(
-    service: Annotated[TranscribeService, Depends(get_transcribe_service)],
+    container: Annotated[AppContainer, Depends(get_container)],
     file: Annotated[Optional[UploadFile], File()] = None,
     model: Annotated[str, Form()] = "whisper-1",
-    language: Annotated[Optional[str], Form()] = "zh-CN",
+    language: Annotated[Optional[str], Form()] = None,
     stream: Annotated[bool, Form()] = False,
 ):
-    """
-    创建音频转录 (multipart/form-data)
-
-    兼容 OpenAI Audio API 格式，接收上传的音频文件（支持 wav/mp3/m4a 等格式）
-    支持 stream=True 参数返回 SSE 流式响应
-    """
+    del model
     if file is None:
         raise HTTPException(status_code=400, detail="No audio file provided")
 
     try:
-        # 读取上传的文件内容
         file_content = await file.read()
-        
-        # 使用 soundfile 解码音频文件（支持 wav/flac/ogg 等格式）
-        # 后端会自动处理重采样，这里直接使用文件原始采样率
-        audio_data, sample_rate = sf.read(
-            io.BytesIO(file_content), dtype="int16"
-        )
-        
-        # 转换为 PCM bytes
+        audio_data, sample_rate = sf.read(io.BytesIO(file_content), dtype="int16")
         pcm_data = audio_data.tobytes()
 
-        # 流式响应
         if stream:
             return StreamingResponse(
                 _generate_sse_stream(
-                    service=service,
+                    use_case=container.transcribe,
                     pcm_data=pcm_data,
                     sample_rate=sample_rate,
-                    language=language or "zh-CN",
+                    language=language or "",
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -114,63 +64,46 @@ async def create_transcription(
                 },
             )
 
-        # 非流式响应
-        result = service.transcribe_pcm(
+        result = container.transcribe.transcribe_pcm(
             pcm_data=pcm_data,
             sample_rate=sample_rate,
-            language=language or "zh-CN",
+            language=language or "",
         )
-
         return Transcription(text=result.text)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
 
 
 @router.post("/transcriptions/base64", response_model=Transcription)
 async def create_transcription_base64(
-    service: Annotated[TranscribeService, Depends(get_transcribe_service)],
+    container: Annotated[AppContainer, Depends(get_container)],
     request: TranscriptionBase64Request,
 ):
-    """
-    创建音频转录 (JSON + Base64)
-
-    接收 Base64 编码的 PCM 音频数据
-    """
     try:
-        result = service.transcribe_base64(
+        result = container.transcribe.transcribe_base64(
             base64_data=request.audio,
             sample_rate=request.sample_rate,
-            language=request.language or "zh-CN",
+            language=request.language or "",
             hotwords=request.hotwords,
         )
-
         return Transcription(text=result.text)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
 
 
 @router.post("/transcriptions/raw", response_model=Transcription)
 async def create_transcription_raw(
-    service: Annotated[TranscribeService, Depends(get_transcribe_service)],
+    container: Annotated[AppContainer, Depends(get_container)],
     body: Annotated[bytes, Body(media_type="application/octet-stream")],
-    language: str = "zh-CN",
+    language: str = "",
     sample_rate: int = 16000,
 ):
-    """
-    创建音频转录 (原始二进制)
-
-    直接接收 PCM 音频二进制数据
-    """
     try:
-        result = service.transcribe_pcm(
+        result = container.transcribe.transcribe_pcm(
             pcm_data=body,
             sample_rate=sample_rate,
             language=language,
         )
-
         return Transcription(text=result.text)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")

@@ -1,43 +1,34 @@
-"""
-FastAPI 路由 - Chat Completions API
-兼容 OpenAI Chat API 格式
-"""
+"""HTTP interface for OpenAI-compatible chat completions."""
+
+from __future__ import annotations
 
 import json
 import logging
 from collections.abc import Iterable, Iterator
-from typing import Annotated, List, Optional, Union
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from openai.types.chat.chat_completion_audio_param import ChatCompletionAudioParam
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
-from openai.types.chat.chat_completion_tool_union_param import (
-    ChatCompletionToolUnionParam,
-)
+from openai.types.chat.chat_completion_tool_union_param import ChatCompletionToolUnionParam
 
-from nexus.inferencers.chat.inferencer import Inferencer
-
-from .depends import get_chat_inferencer as get_inferencer
-
-router = APIRouter(prefix="/chat", tags=["Chat"])
+from nexus.application.container import AppContainer, get_container
 
 logger = logging.getLogger(__name__)
 
+router = APIRouter(prefix="/chat", tags=["Chat"])
 
-def get_stream_response(
-    straem_response: Iterable[ChatCompletionChunk],
-) -> Iterator[str]:
-    for chunk in straem_response:
-        chunk = chunk.model_dump()
-        chunk = json.dumps(chunk, ensure_ascii=False)
-        yield f"data: {chunk}\n\n"
+
+def _stream_response(stream_response: Iterable[ChatCompletionChunk]) -> Iterator[str]:
+    for chunk in stream_response:
+        yield f"data: {json.dumps(chunk.model_dump(), ensure_ascii=False)}\n\n"
 
 
 @router.post("/completions")
 async def create_chat_completion(
-    inferencer: Annotated[Inferencer, Depends(get_inferencer)],
+    container: Annotated[AppContainer, Depends(get_container)],
     messages: Annotated[List[ChatCompletionMessageParam], Body(..., embed=True)],
     model: Annotated[str, Body(..., embed=True)],
     audio: Annotated[Optional[ChatCompletionAudioParam], Body(embed=True)] = None,
@@ -47,15 +38,9 @@ async def create_chat_completion(
     max_tokens: Annotated[Optional[int], Body(embed=True)] = None,
     stream: Annotated[bool, Body(embed=True)] = False,
 ):
-    """
-    创建 Chat Completion
-
-    兼容 OpenAI Chat API 格式
-    支持 stream=True 参数返回 SSE 流式响应
-    """
-    logger.info(f"Request received: model={model}, len(messages)={len(messages)}")
+    logger.info("Chat completion request model=%s messages=%s", model, len(messages))
     try:
-        response = inferencer.chat(
+        response = container.chat.execute(
             messages=messages,
             model=model,
             audio=audio,
@@ -66,18 +51,16 @@ async def create_chat_completion(
             stream=stream,
         )
         if not stream:
-            return response  # 非流式直接返回
-        # 处理流式返回
-        if stream:
-            # 流式响应
-            return StreamingResponse(
-                get_stream_response(response),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                },
-            )
-    except Exception as e:
-        logger.error(f"Chat completion error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            return response
+
+        return StreamingResponse(
+            _stream_response(response),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+    except Exception as exc:
+        logger.error("Chat completion error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

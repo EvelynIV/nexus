@@ -29,6 +29,11 @@ dependencies = [
 [tool.poetry]
 packages = [{include = "nexus", from = "src"}]
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+pytest-asyncio = "^1.2.0"
+pytest-cov = "^7.0.0"
+
 # [tool.poetry.scripts]
 # speecharm = "speecharm.commands.app:app"
 
