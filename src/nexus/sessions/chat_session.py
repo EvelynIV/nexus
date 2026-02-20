@@ -13,7 +13,7 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 
-from nexus.inferencers.chat.inferencer import (
+from nexus.infrastructure.chat.inferencer import (
     AsyncInferencer as AsyncChatInferencer,
     Inferencer as ChatInferencer,
 )

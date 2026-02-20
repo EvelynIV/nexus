@@ -5,7 +5,12 @@ MCP 数据模型
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+
+ToolFilter = Dict[str, Any]
+AllowedTools = Optional[Union[List[str], ToolFilter]]
+RequireApproval = Optional[Union[str, ToolFilter]]
 
 
 @dataclass
@@ -26,8 +31,8 @@ class McpServerConfig:
     server_label: str
     server_url: str
     headers: Dict[str, str] = field(default_factory=dict)
-    require_approval: str = "never"  # "never" | "always" | "auto"
-    allowed_tools: Optional[List[str]] = None
+    require_approval: RequireApproval = "never"
+    allowed_tools: AllowedTools = None
     server_description: Optional[str] = None
     
     @classmethod
@@ -53,6 +58,42 @@ class McpServerConfig:
             allowed_tools=data.get("allowed_tools"),
             server_description=data.get("server_description"),
         )
+
+    def allows_tool(
+        self,
+        *,
+        tool_name: str,
+        annotations: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if self.allowed_tools is None:
+            return True
+
+        if isinstance(self.allowed_tools, list):
+            return tool_name in self.allowed_tools
+
+        if isinstance(self.allowed_tools, dict):
+            tool_names = self.allowed_tools.get("tool_names")
+            if tool_names and tool_name not in tool_names:
+                return False
+
+            read_only = self.allowed_tools.get("read_only")
+            if read_only is None:
+                return True
+
+            readonly_hint = None
+            if annotations:
+                readonly_hint = (
+                    annotations.get("readOnlyHint")
+                    if "readOnlyHint" in annotations
+                    else annotations.get("read_only")
+                )
+
+            # `read_only=true` 过滤器在缺少注解时保守拒绝，避免误放开写操作工具。
+            if readonly_hint is None:
+                return not bool(read_only)
+            return bool(readonly_hint) is bool(read_only)
+
+        return False
 
 
 @dataclass

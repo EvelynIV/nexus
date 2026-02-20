@@ -9,4 +9,4 @@ class NexusConfig:
     chat_base_url: str
     chat_api_key: str
     
-    asr_interim_results: bool = False
+    asr_interim_results: bool = True

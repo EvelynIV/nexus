@@ -9,11 +9,8 @@ import typer
 import uvicorn
 from fastapi import FastAPI
 from pathlib import Path
-from nexus.api.v1 import chat as chat_api
-from nexus.api.v1 import depends
-from nexus.api.v1 import realtime as realtime_api
-from nexus.api.v1 import transcribe as transcribe_api
-from nexus.api.v1 import tts as tts_api
+from nexus.application import container as app_container
+from nexus.api.v1 import router as v1_router
 from omegaconf import OmegaConf, ListConfig
 from nexus.configs.config import NexusConfig
 
@@ -30,33 +27,17 @@ def create_fastapi_app(
     engine_config: NexusConfig,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
-    # 配置 gRPC 地址 (同步服务，可以在启动前初始化)
-    transcribe_api.configure(
-        grpc_addr=engine_config.asr_grpc_addr,
-        interim_results=engine_config.asr_interim_results,
-    )
-    # 配置 Chat API
-    depends.configure_chat(
-        base_url=engine_config.chat_base_url, api_key=engine_config.chat_api_key
-    )
-    # 配置 TTS API
-    tts_api.configure(
-        base_url=engine_config.tts_base_url, api_key=engine_config.tts_api_key
-    )
-
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """
         FastAPI lifespan 上下文管理器。
         在此处初始化需要绑定到 uvicorn event loop 的异步资源（如 grpc.aio channel）。
         """
-        # 在 uvicorn event loop 中初始化 Realtime API（包含 grpc.aio channel）
-        realtime_api.configure(engine_config=engine_config)
-        logger.info("Realtime API initialized in uvicorn event loop")
+        app_container.configure(engine_config=engine_config)
+        logger.info("Application container initialized")
         yield
-        # 关闭时清理资源
-        await realtime_api.shutdown()
-        logger.info("Realtime API shutdown complete")
+        await app_container.shutdown()
+        logger.info("Application container shutdown complete")
 
     fastapi_app = FastAPI(
         title="Nexus ASR API",
@@ -66,10 +47,7 @@ def create_fastapi_app(
     )
 
     # 注册路由
-    fastapi_app.include_router(transcribe_api.router, prefix="/v1")
-    fastapi_app.include_router(realtime_api.router, prefix="/v1")
-    fastapi_app.include_router(chat_api.router, prefix="/v1")
-    fastapi_app.include_router(tts_api.router, prefix="/v1")
+    fastapi_app.include_router(v1_router)
 
     @fastapi_app.get("/health")
     async def health_check():

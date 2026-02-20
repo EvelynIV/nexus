@@ -85,6 +85,11 @@ class McpToolRegistry:
         
         # 注册工具
         for tool in tools:
+            existing_server = self._tool_to_server.get(tool.name)
+            if existing_server and existing_server != server_label:
+                raise ValueError(
+                    f"Duplicate MCP tool name '{tool.name}' from '{server_label}' conflicts with '{existing_server}'"
+                )
             self._tools[tool.name] = tool
             self._tool_to_server[tool.name] = server_label
             logger.debug(f"Registered MCP tool: {tool.name} from {server_label}")

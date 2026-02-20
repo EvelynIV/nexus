@@ -128,8 +128,18 @@ class McpClient:
         tools = []
         
         for tool in result.tools:
-            # 过滤工具（如果配置了 allowed_tools）
-            if self.config.allowed_tools and tool.name not in self.config.allowed_tools:
+            annotations = None
+            if hasattr(tool, "annotations") and tool.annotations is not None:
+                raw_annotations = tool.annotations
+                if hasattr(raw_annotations, "model_dump"):
+                    annotations = raw_annotations.model_dump(exclude_none=True)
+                elif isinstance(raw_annotations, dict):
+                    annotations = dict(raw_annotations)
+                else:
+                    annotations = {"value": str(raw_annotations)}
+
+            # 过滤工具（支持 list 与 filter object）
+            if not self.config.allows_tool(tool_name=tool.name, annotations=annotations):
                 continue
             
             mcp_tool = McpTool(
@@ -137,7 +147,7 @@ class McpClient:
                 description=tool.description or "",
                 input_schema=tool.inputSchema if hasattr(tool, 'inputSchema') else {},
                 server_label=self.config.server_label,
-                annotations=None,
+                annotations=annotations,
             )
             tools.append(mcp_tool)
         
