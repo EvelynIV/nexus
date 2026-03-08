@@ -3,13 +3,16 @@ Nexus CLI 应用 - Typer 入口
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 import typer
 import uvicorn
 from fastapi import FastAPI
-
-from nexus.api.v1 import realtime as realtime_api
-from nexus.api.v1 import transcribe as transcribe_api
+from pathlib import Path
+from nexus.application import container as app_container
+from nexus.api.v1 import router as v1_router
+from omegaconf import OmegaConf, ListConfig
+from nexus.configs.config import NexusConfig
 
 app = typer.Typer(
     name="nexus",
@@ -20,21 +23,31 @@ app = typer.Typer(
 logger = logging.getLogger(__name__)
 
 
-def create_fastapi_app(grpc_addr: str) -> FastAPI:
+def create_fastapi_app(
+    engine_config: NexusConfig,
+) -> FastAPI:
     """创建 FastAPI 应用实例"""
-    # 配置 gRPC 地址
-    transcribe_api.configure(grpc_addr=grpc_addr)
-    realtime_api.configure(grpc_addr=grpc_addr)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """
+        FastAPI lifespan 上下文管理器。
+        在此处初始化需要绑定到 uvicorn event loop 的异步资源（如 grpc.aio channel）。
+        """
+        app_container.configure(engine_config=engine_config)
+        logger.info("Application container initialized")
+        yield
+        await app_container.shutdown()
+        logger.info("Application container shutdown complete")
 
     fastapi_app = FastAPI(
         title="Nexus ASR API",
         description="语音识别服务 API - 兼容 OpenAI Whisper API",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # 注册路由
-    fastapi_app.include_router(transcribe_api.router, prefix="/v1")
-    fastapi_app.include_router(realtime_api.router, prefix="/v1")
+    fastapi_app.include_router(v1_router)
 
     @fastapi_app.get("/health")
     async def health_check():
@@ -45,10 +58,21 @@ def create_fastapi_app(grpc_addr: str) -> FastAPI:
 
 @app.command()
 def serve(
+    engine_config: Path = typer.Argument(
+        ...,
+        help="引擎配置文件路径 (YAML 格式)",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        envvar="NEXUS_ENGINE_CONFIG",
+    ),
+    log_level: str = typer.Option(
+        "info",
+        help="日志级别 (debug, info, warning, error)",
+        envvar="NEXUS_LOG_LEVEL",
+    ),
     host: str = typer.Option(
         "0.0.0.0",
-        "--host",
-        "-h",
         help="HTTP 服务监听地址",
         envvar="NEXUS_HOST",
     ),
@@ -59,36 +83,18 @@ def serve(
         help="HTTP 服务监听端口",
         envvar="NEXUS_PORT",
     ),
-    grpc_addr: str = typer.Option(
-        "localhost:50051",
-        "--grpc-addr",
-        "-g",
-        help="gRPC ASR 服务地址",
-        envvar="NEXUS_GRPC_ADDR",
-    ),
-    log_level: str = typer.Option(
-        "info",
-        "--log-level",
-        "-l",
-        help="日志级别 (debug, info, warning, error)",
-        envvar="NEXUS_LOG_LEVEL",
-    ),
-    # 🔐 新增 SSL 参数
-    ssl_certfile: str = typer.Option(
+    ssl_certfile: Path = typer.Option(
         None,
-        "--ssl-certfile",
         help="SSL 证书文件路径 (server.crt)",
         envvar="NEXUS_SSL_CERTFILE",
     ),
-    ssl_keyfile: str = typer.Option(
+    ssl_keyfile: Path = typer.Option(
         None,
-        "--ssl-keyfile",
         help="SSL 私钥文件路径 (server.key)",
         envvar="NEXUS_SSL_KEYFILE",
     ),
-    ssl_ca_certs: str = typer.Option(
+    ssl_ca_certs: Path = typer.Option(
         None,
-        "--ssl-ca-certs",
         help="CA 证书链文件（可选）",
         envvar="NEXUS_SSL_CA_CERTS",
     ),
@@ -103,12 +109,18 @@ def serve(
     )
 
     logger.info(f"Starting Nexus API server on {host}:{port}")
-    logger.info(f"gRPC ASR backend: {grpc_addr}")
+    logger.info(f"using engine config: {engine_config}")
     logger.info(
         f"ssl_certfile: {ssl_certfile}, ssl_keyfile: {ssl_keyfile}, ssl_ca_certs: {ssl_ca_certs}"
     )
-    # 创建 FastAPI 应用
-    fastapi_app = create_fastapi_app(grpc_addr=grpc_addr)
+
+    engine_config: ListConfig = OmegaConf.load(engine_config)
+    engine_config = OmegaConf.to_container(engine_config, resolve=True)
+    engine_config = NexusConfig(**engine_config)
+
+    fastapi_app = create_fastapi_app(
+        engine_config=engine_config,
+    )
 
     # 启动 uvicorn
     uvicorn.run(
@@ -119,6 +131,8 @@ def serve(
         ssl_ca_certs=ssl_ca_certs,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
+        ws_ping_interval=20,  # 每 20 秒发送一次 ping 保持连接
+        ws_ping_timeout=60,   # 60 秒内无 pong 响应才断开
     )
 
 

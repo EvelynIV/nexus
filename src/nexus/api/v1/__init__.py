@@ -1,3 +1,3 @@
-from nexus.api.v1 import realtime, transcribe
+from .router import router
 
-__all__ = ["realtime", "transcribe"]
+__all__ = ["router"]
