@@ -42,6 +42,9 @@ class EffectiveResponseConfig:
 
 
 class RealtimeApplicationService:
+    REALTIME_PCM_FORMAT = "audio/pcm"
+    REALTIME_AUDIO_SAMPLE_RATE = 24000
+
     def __init__(
         self,
         grpc_addr: str,
@@ -115,6 +118,16 @@ class RealtimeApplicationService:
         if model:
             session.chat_model = model
 
+        try:
+            self._validate_audio_input_update(update)
+        except ValueError as exc:
+            await session.writer.send_error(
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="invalid_audio_input_format",
+            )
+            return
+
         output_modalities = getattr(update, "output_modalities", None)
         if output_modalities is not None:
             try:
@@ -146,6 +159,7 @@ class RealtimeApplicationService:
                 error_type="invalid_request_error",
                 code="invalid_audio_output_format",
             )
+            return
 
         raw_tools = getattr(update, "tools", None)
         if raw_tools is not None:
@@ -298,10 +312,10 @@ class RealtimeApplicationService:
         return ["text"]
 
     def _ensure_audio_output_supported(self, format_type: str) -> None:
-        if format_type != "audio/pcm":
+        if format_type != self.REALTIME_PCM_FORMAT:
             raise ValueError(
                 f"Unsupported realtime audio output format '{format_type}'. "
-                "Only 'audio/pcm' is currently supported."
+                f"Only '{self.REALTIME_PCM_FORMAT}' is currently supported."
             )
 
     def _extract_format_type(self, format_config) -> Optional[str]:
@@ -312,6 +326,59 @@ class RealtimeApplicationService:
         if isinstance(format_config, dict):
             return format_config.get("type")
         return getattr(format_config, "type", None)
+
+    def _extract_format_rate(self, format_config) -> Optional[int]:
+        if format_config is None:
+            return None
+        if isinstance(format_config, dict):
+            rate = format_config.get("rate")
+        else:
+            rate = getattr(format_config, "rate", None)
+        if rate is None:
+            return None
+        return int(rate)
+
+    def _model_to_dict(self, value) -> dict:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            return value.model_dump(exclude_none=True)
+        return {}
+
+    def _validate_audio_input_update(self, update) -> None:
+        audio_config = update.get("audio") if isinstance(update, dict) else getattr(update, "audio", None)
+        if audio_config is None:
+            return
+
+        input_config = (
+            audio_config.get("input")
+            if isinstance(audio_config, dict)
+            else getattr(audio_config, "input", None)
+        )
+        if input_config is None:
+            return
+
+        input_data = self._model_to_dict(input_config)
+        format_config = input_data.get("format")
+        if format_config is None:
+            return
+
+        format_type = self._extract_format_type(format_config)
+        format_rate = self._extract_format_rate(format_config)
+
+        if format_type is not None and format_type != self.REALTIME_PCM_FORMAT:
+            raise ValueError(
+                f"Unsupported realtime audio input format '{format_type}'. "
+                f"Only '{self.REALTIME_PCM_FORMAT}' is currently supported."
+            )
+
+        if format_rate is not None and format_rate != self.REALTIME_AUDIO_SAMPLE_RATE:
+            raise ValueError(
+                "Unsupported realtime audio input sample rate "
+                f"'{format_rate}'. Only '{self.REALTIME_AUDIO_SAMPLE_RATE}' is supported."
+            )
 
     def _apply_audio_output_update(self, session: RealtimeSessionState, update) -> None:
         audio_config = getattr(update, "audio", None)
@@ -462,10 +529,15 @@ class RealtimeApplicationService:
         session: RealtimeSessionState,
         model: str,
     ) -> dict:
+        input_cfg = session.get_audio_input_config()
         audio_cfg = session.get_audio_output_config()
+        input_format = {"type": input_cfg["format_type"]}
+        if input_cfg["format_type"] == self.REALTIME_PCM_FORMAT:
+            input_format["rate"] = input_cfg["sample_rate"]
+
         output_format = {"type": audio_cfg["format_type"]}
-        if audio_cfg["format_type"] == "audio/pcm":
-            output_format["rate"] = 24000
+        if audio_cfg["format_type"] == self.REALTIME_PCM_FORMAT:
+            output_format["rate"] = self.REALTIME_AUDIO_SAMPLE_RATE
 
         return {
             "id": session.session_id,
@@ -473,6 +545,9 @@ class RealtimeApplicationService:
             "model": model,
             "output_modalities": session.get_output_modalities(),
             "audio": {
+                "input": {
+                    "format": input_format,
+                },
                 "output": {
                     "format": output_format,
                     "voice": audio_cfg["voice"],

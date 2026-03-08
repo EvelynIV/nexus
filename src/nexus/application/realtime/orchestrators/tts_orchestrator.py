@@ -11,6 +11,8 @@ MIN_TTS_SEGMENT_CHARS = 30
 DEFAULT_TTS_SEGMENT_CONCURRENCY = 3
 AUDIO_CHUNK_SIZE = 4096
 
+_SENTINEL = object()  # 标记段内音频流结束
+
 
 def split_text_to_tts_segments(
     text: str,
@@ -51,24 +53,26 @@ def realtime_audio_format_to_tts_response_format(format_type: str) -> str:
     raise ValueError(f"Unsupported realtime audio output format: {format_type}")
 
 
-async def _collect_segment_chunks(
+async def _produce_segment_to_queue(
     inferencer: TTSInferencer,
     segment_text: str,
     voice: str,
     response_format: str,
     speed: float,
-) -> list[bytes]:
-    """Collect all audio chunks for a single segment asynchronously."""
-    chunks: list[bytes] = []
-    async for chunk in inferencer.speech_stream(
-        input=segment_text,
-        voice=voice,
-        response_format=response_format,
-        speed=speed,
-    ):
-        if chunk:
-            chunks.append(chunk)
-    return chunks
+    queue: asyncio.Queue,
+) -> None:
+    """Stream TTS chunks for one segment into *queue*, then push sentinel."""
+    try:
+        async for chunk in inferencer.speech_stream(
+            input=segment_text,
+            voice=voice,
+            response_format=response_format,
+            speed=speed,
+        ):
+            if chunk:
+                await queue.put(chunk)
+    finally:
+        await queue.put(_SENTINEL)
 
 
 async def stream_tts_audio_for_text(
@@ -82,7 +86,13 @@ async def stream_tts_audio_for_text(
     min_segment_chars: int = MIN_TTS_SEGMENT_CHARS,
     concurrency: int = DEFAULT_TTS_SEGMENT_CONCURRENCY,
 ) -> None:
-    """Synthesize text in parallel segments and stream chunks in order."""
+    """Synthesize text in parallel segments and stream chunks in order.
+
+    Each segment is synthesized concurrently (bounded by *concurrency*),
+    but chunks are forwarded to *send_chunk* in strict segment order.
+    Within each segment, chunks are streamed as soon as they arrive from
+    the TTS backend — no buffering of the entire segment.
+    """
     segments = split_text_to_tts_segments(text, min_segment_chars=min_segment_chars)
     if not segments:
         return
@@ -90,23 +100,33 @@ async def stream_tts_audio_for_text(
     response_format = realtime_audio_format_to_tts_response_format(format_type)
     semaphore = asyncio.Semaphore(max(concurrency, 1))
 
-    async def produce_segment(segment_text: str) -> list[bytes]:
-        async with semaphore:
-            return await _collect_segment_chunks(
-                inferencer, segment_text, voice, response_format, speed
-            )
+    # 为每个段创建一个独立的 queue 和对应的生产者 task
+    queues: list[asyncio.Queue] = []
+    tasks: list[asyncio.Task] = []
 
-    # Launch all segments concurrently (bounded by semaphore).
-    tasks = [asyncio.create_task(produce_segment(seg)) for seg in segments]
+    for seg in segments:
+        q: asyncio.Queue = asyncio.Queue()
+        queues.append(q)
+
+        async def _bounded_produce(
+            _seg: str = seg, _q: asyncio.Queue = q
+        ) -> None:
+            async with semaphore:
+                await _produce_segment_to_queue(
+                    inferencer, _seg, voice, response_format, speed, _q
+                )
+
+        tasks.append(asyncio.create_task(_bounded_produce()))
 
     try:
-        # Stream chunks in segment order.
-        for task in tasks:
-            chunks = await task
-            for chunk in chunks:
-                await send_chunk(chunk)
+        # 按段顺序消费，段内流式
+        for q in queues:
+            while True:
+                item = await q.get()
+                if item is _SENTINEL:
+                    break
+                await send_chunk(item)
     finally:
-        # Cancel any remaining tasks on error.
         for task in tasks:
             if not task.done():
                 task.cancel()

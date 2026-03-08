@@ -390,7 +390,7 @@ class AudioResponseContext:
     async def _send_audio_bytes(self, audio_bytes: bytes) -> None:
         """接收上游 TTS 原始音频，经流式重采样后发送。"""
         if self._resampler is not None:
-            resampled = self._resampler.process(audio_bytes)
+            resampled = await self._resampler.aprocess(audio_bytes)
             if resampled:
                 await self._send_audio_raw(resampled)
         else:
@@ -411,7 +411,7 @@ class AudioResponseContext:
         )
         # 冲刷重采样器内部滤波器缓冲区中的剩余数据
         if self._resampler is not None:
-            tail = self._resampler.flush()
+            tail = await self._resampler.aflush()
             if tail:
                 await self._send_audio_raw(tail)
 

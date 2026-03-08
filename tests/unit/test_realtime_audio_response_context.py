@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from nexus.application.realtime.emitters.response_contexts import AudioResponseContext
@@ -17,6 +18,9 @@ class CollectingSession:
 
 
 class FakeTTSInferencer:
+    """Fake TTS that yields valid PCM16 audio data large enough for the
+    48 kHz→24 kHz resampler to produce output."""
+
     async def speech_stream(
         self,
         *,
@@ -28,7 +32,11 @@ class FakeTTSInferencer:
         **kwargs,
     ):
         del model, voice, response_format, speed, kwargs
-        yield input.encode("utf-8")
+        # Generate ~0.1 s of 48 kHz PCM16 silence-ish data (4800 samples = 9600 bytes).
+        # This is large enough for even sinc_best to produce resampled output.
+        n_samples = 4800
+        pcm = np.zeros(n_samples, dtype=np.int16).tobytes()
+        yield pcm
 
 
 @pytest.mark.asyncio

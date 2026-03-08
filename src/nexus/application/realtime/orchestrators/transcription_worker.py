@@ -4,12 +4,15 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+import numpy as np
+
 from nexus.application.realtime.orchestrators.response_orchestrator import (
     TranscriptionStreamTracker,
     send_transcribe_interim,
     send_transcribe_response,
 )
 from nexus.domain.realtime import RealtimeSessionState
+from nexus.infrastructure.audio import StreamingResampler
 from nexus.infrastructure.asr import AsyncInferencer
 
 logger = logging.getLogger(__name__)
@@ -33,9 +36,36 @@ async def run_transcription_worker(
     """
     tracker = TranscriptionStreamTracker()
 
+    async def _asr_audio_iter():
+        resampler: StreamingResampler | None = None
+        if session.audio_input_sample_rate != session.asr_sample_rate:
+            resampler = StreamingResampler(
+                input_rate=session.audio_input_sample_rate,
+                output_rate=session.asr_sample_rate,
+            )
+            logger.info(
+                "ASR streaming resampler enabled %dHz -> %dHz",
+                session.audio_input_sample_rate,
+                session.asr_sample_rate,
+            )
+
+        async for chunk in session.audio_iter():
+            if resampler is None:
+                yield chunk
+                continue
+
+            resampled = await resampler.aprocess(chunk.tobytes())
+            if resampled:
+                yield np.frombuffer(resampled, dtype=np.int16).copy()
+
+        if resampler is not None:
+            tail = await resampler.aflush()
+            if tail:
+                yield np.frombuffer(tail, dtype=np.int16).copy()
+
     async for asr_result in inferencer.transcribe(
-        session.audio_iter(),
-        sample_rate=session.sample_rate,
+        _asr_audio_iter(),
+        sample_rate=session.asr_sample_rate,
         interim_results=interim_results,
     ):
         if not asr_result.is_final:

@@ -34,7 +34,9 @@ class RealtimeSessionState:
     tools: List[RealtimeFunctionTool] = field(default_factory=list)
     mcp_registry: McpToolRegistry = field(default_factory=McpToolRegistry)
 
-    sample_rate: int = 16000
+    audio_input_format_type: str = "audio/pcm"
+    audio_input_sample_rate: int = 24000
+    asr_sample_rate: int = 16000
     output_modalities: list[str] = field(default_factory=lambda: ["text"])
     audio_output_format_type: str = "audio/pcm"
     audio_output_voice: str = "alloy"
@@ -100,6 +102,12 @@ class RealtimeSessionState:
             "format_type": self.audio_output_format_type,
             "voice": self.audio_output_voice,
             "speed": self.audio_output_speed,
+        }
+
+    def get_audio_input_config(self) -> dict:
+        return {
+            "format_type": self.audio_input_format_type,
+            "sample_rate": self.audio_input_sample_rate,
         }
 
     def get_all_tools(self) -> List[RealtimeFunctionTool]:
