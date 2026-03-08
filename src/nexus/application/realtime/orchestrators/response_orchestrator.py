@@ -18,7 +18,7 @@ from nexus.application.realtime.emitters.response_contexts import (
 
 if TYPE_CHECKING:
     from nexus.domain.realtime import RealtimeSessionState
-    from nexus.infrastructure.tts import Inferencer as TTSInferencer
+    from nexus.infrastructure.tts import TTSBackend
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,7 @@ async def process_chat_stream(
     chat_stream: Iterable[ChatCompletionChunk],
     *,
     modalities: Optional[list[str]] = None,
-    tts_inferencer: Optional["TTSInferencer"] = None,
+    tts_backend: Optional["TTSBackend"] = None,
     audio_output_format_type: str = "audio/pcm",
     audio_output_voice: str = "alloy",
     audio_output_speed: float = 1.0,
@@ -406,11 +406,11 @@ async def process_chat_stream(
 
                 if audio_mode:
                     if audio_ctx is None:
-                        if tts_inferencer is None:
-                            raise RuntimeError("TTS inferencer is not configured for audio output")
+                        if tts_backend is None:
+                            raise RuntimeError("TTS backend is not configured for audio output")
                         audio_ctx = AudioResponseContext(
                             session,
-                            tts_inferencer=tts_inferencer,
+                            tts_backend=tts_backend,
                             modalities=active_modalities,
                             format_type=audio_output_format_type,
                             voice=audio_output_voice,
@@ -528,7 +528,7 @@ async def send_tool_result_response(
     chat_stream: Iterable[ChatCompletionChunk],
     *,
     modalities: Optional[list[str]] = None,
-    tts_inferencer: Optional["TTSInferencer"] = None,
+    tts_backend: Optional["TTSBackend"] = None,
     audio_output_format_type: str = "audio/pcm",
     audio_output_voice: str = "alloy",
     audio_output_speed: float = 1.0,
@@ -541,7 +541,7 @@ async def send_tool_result_response(
         session=session,
         chat_stream=chat_stream,
         modalities=modalities,
-        tts_inferencer=tts_inferencer,
+        tts_backend=tts_backend,
         audio_output_format_type=audio_output_format_type,
         audio_output_voice=audio_output_voice,
         audio_output_speed=audio_output_speed,

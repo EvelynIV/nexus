@@ -99,7 +99,7 @@ def test_session_payload_contains_input_and_output_audio_rates() -> None:
 @pytest.mark.asyncio
 async def test_apply_session_update_rejects_invalid_input_rate_without_session_updated() -> None:
     service = _service_without_init()
-    service.tts_inferencer = None
+    service.tts_backend = None
 
     writer = SimpleNamespace(send_error=AsyncMock())
     session = SimpleNamespace(

@@ -15,7 +15,7 @@ class FakeTTSInferencer:
     async def speech_stream(
         self,
         *,
-        input: str,
+        text: str,
         model: str = "tts-1",
         voice: str = "alloy",
         response_format: str = "pcm",
@@ -23,13 +23,13 @@ class FakeTTSInferencer:
         **kwargs,
     ):
         del model, voice, response_format, speed, kwargs
-        delay = self.delays.get(input, 0.0)
+        delay = self.delays.get(text, 0.0)
         if delay > 0:
             import asyncio
 
             await asyncio.sleep(delay)
 
-        content = input.encode("utf-8")
+        content = text.encode("utf-8")
         mid = len(content) // 2
         if mid > 0:
             yield content[:mid]
@@ -66,7 +66,7 @@ async def test_stream_tts_audio_for_text_keeps_segment_order() -> None:
     segment_b = "b" * 30 + "。"
     text = segment_a + segment_b
 
-    inferencer = FakeTTSInferencer(
+    backend = FakeTTSInferencer(
         delays={
             segment_a: 0.2,
             segment_b: 0.01,
@@ -79,7 +79,7 @@ async def test_stream_tts_audio_for_text_keeps_segment_order() -> None:
         emitted.append(chunk)
 
     await stream_tts_audio_for_text(
-        inferencer=inferencer,
+        backend=backend,
         text=text,
         voice="alloy",
         speed=1.0,

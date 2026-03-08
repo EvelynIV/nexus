@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import List
 
-from nexus.infrastructure.tts import Inferencer as TTSInferencer
+from nexus.infrastructure.tts import TTSBackend
 from nexus.infrastructure.tts.text_normalizer import normalize_for_tts, split_text_by_punctuation
 
 MIN_TTS_SEGMENT_CHARS = 30
@@ -54,7 +54,7 @@ def realtime_audio_format_to_tts_response_format(format_type: str) -> str:
 
 
 async def _produce_segment_to_queue(
-    inferencer: TTSInferencer,
+    backend: TTSBackend,
     segment_text: str,
     voice: str,
     response_format: str,
@@ -63,8 +63,9 @@ async def _produce_segment_to_queue(
 ) -> None:
     """Stream TTS chunks for one segment into *queue*, then push sentinel."""
     try:
-        async for chunk in inferencer.speech_stream(
-            input=segment_text,
+        async for chunk in backend.speech_stream(
+            text=segment_text,
+            model="tts-1",
             voice=voice,
             response_format=response_format,
             speed=speed,
@@ -77,7 +78,7 @@ async def _produce_segment_to_queue(
 
 async def stream_tts_audio_for_text(
     *,
-    inferencer: TTSInferencer,
+    backend: TTSBackend,
     text: str,
     voice: str,
     speed: float,
@@ -113,7 +114,7 @@ async def stream_tts_audio_for_text(
         ) -> None:
             async with semaphore:
                 await _produce_segment_to_queue(
-                    inferencer, _seg, voice, response_format, speed, _q
+                    backend, _seg, voice, response_format, speed, _q
                 )
 
         tasks.append(asyncio.create_task(_bounded_produce()))

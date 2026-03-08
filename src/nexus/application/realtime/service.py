@@ -26,7 +26,7 @@ from nexus.application.realtime.protocol.ids import event_id
 from nexus.domain.realtime import RealtimeSessionState
 from nexus.infrastructure.asr import AsyncInferencer as ASRInferencer
 from nexus.infrastructure.chat import AsyncInferencer as AsyncChatInferencer
-from nexus.infrastructure.tts import Inferencer as TTSInferencer
+from nexus.infrastructure.tts import TTSBackend
 from nexus.infrastructure.mcp import McpServerConfig
 from nexus.sessions.chat_session import AsyncChatSession
 
@@ -51,8 +51,7 @@ class RealtimeApplicationService:
         interim_results: bool = False,
         chat_base_url: Optional[str] = None,
         chat_api_key: Optional[str] = None,
-        tts_base_url: Optional[str] = None,
-        tts_api_key: Optional[str] = None,
+        tts_backend: Optional[TTSBackend] = None,
     ):
         self.grpc_addr = grpc_addr
         self.interim_results = interim_results
@@ -62,19 +61,15 @@ class RealtimeApplicationService:
             if chat_api_key
             else None
         )
-        self.tts_inferencer = (
-            TTSInferencer(base_url=tts_base_url, api_key=tts_api_key)
-            if tts_api_key
-            else None
-        )
+        self.tts_backend = tts_backend
 
     async def close(self) -> None:
         if self.asr_inferencer:
             await self.asr_inferencer.close()
         if self.chat_inferencer:
             await self.chat_inferencer.close()
-        if self.tts_inferencer:
-            await self.tts_inferencer.close()
+        if self.tts_backend:
+            await self.tts_backend.close()
 
     def create_session(
         self,
@@ -89,9 +84,9 @@ class RealtimeApplicationService:
                 "Chat inferencer is not configured. Set chat_api_key/chat_base_url for realtime chat models."
             )
         normalized_modalities = self._normalize_output_modalities(list(output_modalities or ["text"]))
-        if "audio" in normalized_modalities and self.tts_inferencer is None:
+        if "audio" in normalized_modalities and self.tts_backend is None:
             raise RuntimeError(
-                "TTS inferencer is not configured. Set tts_api_key/tts_base_url for realtime audio output."
+                "TTS backend is not configured. Configure tts_backend for realtime audio output."
             )
         chat_session = AsyncChatSession(chat_inferencer=self.chat_inferencer)
         return RealtimeSessionState(
@@ -139,11 +134,11 @@ class RealtimeApplicationService:
                     code="invalid_output_modalities",
                 )
             else:
-                if "audio" in normalized_modalities and self.tts_inferencer is None:
+                if "audio" in normalized_modalities and self.tts_backend is None:
                     await session.writer.send_error(
                         message=(
-                            "TTS inferencer is not configured. "
-                            "Set tts_api_key/tts_base_url for realtime audio output."
+                            "TTS backend is not configured. "
+                            "Configure tts_backend for realtime audio output."
                         ),
                         error_type="invalid_request_error",
                         code="audio_output_not_configured",
@@ -194,16 +189,16 @@ class RealtimeApplicationService:
         chat_stream = session.chat(user_message)
         response_cfg = self._resolve_response_config(session)
         if "audio" in response_cfg.modalities:
-            if self.tts_inferencer is None:
+            if self.tts_backend is None:
                 raise RuntimeError(
-                    "TTS inferencer is not configured. Set tts_api_key/tts_base_url for realtime audio output."
+                    "TTS backend is not configured. Configure tts_backend for realtime audio output."
                 )
             self._ensure_audio_output_supported(response_cfg.audio_format_type)
         result = await process_chat_stream(
             session=session,
             chat_stream=chat_stream,
             modalities=response_cfg.modalities,
-            tts_inferencer=self.tts_inferencer,
+            tts_backend=self.tts_backend,
             audio_output_format_type=response_cfg.audio_format_type,
             audio_output_voice=response_cfg.audio_voice,
             audio_output_speed=response_cfg.audio_speed,
@@ -232,11 +227,11 @@ class RealtimeApplicationService:
             return
 
         if "audio" in response_cfg.modalities:
-            if self.tts_inferencer is None:
+            if self.tts_backend is None:
                 await session.writer.send_error(
                     message=(
-                        "TTS inferencer is not configured. "
-                        "Set tts_api_key/tts_base_url for realtime audio output."
+                        "TTS backend is not configured. "
+                        "Configure tts_backend for realtime audio output."
                     ),
                     error_type="invalid_request_error",
                     code="audio_output_not_configured",
@@ -257,7 +252,7 @@ class RealtimeApplicationService:
             session=session,
             chat_stream=chat_stream,
             modalities=response_cfg.modalities,
-            tts_inferencer=self.tts_inferencer,
+            tts_backend=self.tts_backend,
             audio_output_format_type=response_cfg.audio_format_type,
             audio_output_voice=response_cfg.audio_voice,
             audio_output_speed=response_cfg.audio_speed,
