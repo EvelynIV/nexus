@@ -332,6 +332,10 @@ class AudioResponseContext:
         return True
 
     @property
+    def include_text_output(self) -> bool:
+        return "text" in self.modalities
+
+    @property
     def content(self) -> str:
         return self._display_text
 
@@ -372,8 +376,18 @@ class AudioResponseContext:
                 item_id=self.item_id,
                 response_id=self.response_id,
                 event_id=event_id(),
+                content_index=0,
             )
         )
+        if self.include_text_output:
+            await self.session.send_event(
+                build_content_part_added_event(
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    event_id=event_id(),
+                    content_index=1,
+                )
+            )
         if getattr(self.tts_backend, "supports_duplex", False):
             self._duplex_session = await self.tts_backend.open_duplex_session(
                 model="tts-1",
@@ -398,9 +412,18 @@ class AudioResponseContext:
             self._tts_text += tts_delta
         if self._duplex_session is not None and tts_delta:
             await self._duplex_session.send_text(tts_delta)
-        if not self.include_transcript or not delta:
-            return
-        await self._emit_transcript_delta(delta)
+        if delta and self.include_text_output:
+            await self.session.send_event(
+                build_text_delta_event(
+                    delta=delta,
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    event_id=event_id(),
+                    content_index=1,
+                )
+            )
+        if self.include_transcript and delta:
+            await self._emit_transcript_delta(delta)
 
     async def _consume_duplex_audio(self) -> None:
         if self._duplex_session is None:
@@ -435,11 +458,16 @@ class AudioResponseContext:
                 item_id=self.item_id,
                 response_id=self.response_id,
                 event_id=event_id(),
+                content_index=0,
             )
         )
         self._audio_delta_count += 1
+        if hasattr(self.session, "push_audio_output"):
+            await self.session.push_audio_output(audio_bytes)
         if is_first_audio_delta:
             self._audio_started = True
+            if hasattr(self.session, "lock_audio_voice"):
+                self.session.lock_audio_voice()
 
     async def _send_audio_bytes(self, audio_bytes: bytes) -> None:
         """接收上游 TTS 原始音频，经流式重采样后发送。"""
@@ -497,6 +525,7 @@ class AudioResponseContext:
                 item_id=self.item_id,
                 response_id=self.response_id,
                 event_id=event_id(),
+                content_index=0,
             )
         )
 
@@ -508,6 +537,7 @@ class AudioResponseContext:
                     item_id=self.item_id,
                     response_id=self.response_id,
                     event_id=event_id(),
+                    content_index=0,
                 )
             )
 
@@ -517,8 +547,28 @@ class AudioResponseContext:
                 response_id=self.response_id,
                 event_id=event_id(),
                 transcript=transcript,
+                content_index=0,
             )
         )
+        if self.include_text_output:
+            await self.session.send_event(
+                build_text_done_event(
+                    text=self._display_text,
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    event_id=event_id(),
+                    content_index=1,
+                )
+            )
+            await self.session.send_event(
+                build_content_part_done_event(
+                    text=self._display_text,
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    event_id=event_id(),
+                    content_index=1,
+                )
+            )
 
         item_status = "completed"
         if cancelled or failed:
@@ -532,6 +582,15 @@ class AudioResponseContext:
                 type="output_audio",
             )
         )
+        if self.include_text_output:
+            self._item.content.append(
+                realtime_conversation_item_assistant_message.Content(
+                    audio=None,
+                    text=self._display_text,
+                    transcript=None,
+                    type="output_text",
+                )
+            )
         self._item.status = item_status
 
         await self.session.send_event(
@@ -632,6 +691,7 @@ class AudioResponseContext:
                 item_id=self.item_id,
                 response_id=self.response_id,
                 event_id=event_id(),
+                content_index=0,
             )
         )
 

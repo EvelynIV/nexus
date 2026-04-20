@@ -7,4 +7,4 @@ from ..context import RealtimeDispatchContext
 
 async def handle_response_create(event: RealtimeClientEvent, ctx: RealtimeDispatchContext) -> None:
     assert isinstance(event, ResponseCreateEvent)
-    await ctx.service.handle_response_create(ctx.session, event)
+    await ctx.service.handle_response_create(ctx.session, event, reply_sink=ctx.reply_sink)

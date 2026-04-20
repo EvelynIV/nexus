@@ -1,33 +1,64 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import Depends, Query, WebSocket, WebSocketDisconnect
 
 from nexus.application.container import AppContainer, get_container
-from nexus.application.realtime.dispatch import RealtimeDispatchContext, build_default_registry
-from nexus.application.realtime.protocol import ClientEventParseError, RealtimeClientParser, RealtimeServerWriter
+from nexus.application.realtime.protocol import BroadcastRealtimeSink, RealtimeServerWriter
+
+from .controller import RealtimeSessionController
+from .http import extract_bearer_token
+from .runtime import get_realtime_api_runtime
+
 
 logger = logging.getLogger(__name__)
 
 
 async def realtime_endpoint_worker(
     websocket: WebSocket,
-    model: str = Query(default="gpt-4o-realtime-preview"),
+    model: str = Query(default="gpt-realtime"),
+    call_id: str | None = Query(default=None),
     container: AppContainer = Depends(get_container),
 ):
-    is_chat_model = "transcribe" not in model.lower()
-    await websocket.accept()
+    runtime = await get_realtime_api_runtime(container)
+    try:
+        bearer_token = extract_bearer_token(websocket.headers.get("authorization"))
+    except Exception:
+        await websocket.close(code=1008)
+        return
 
+    if runtime.api_key_required() and not runtime.check_api_key(bearer_token):
+        await websocket.close(code=1008)
+        return
+
+    if call_id:
+        call = await runtime.calls.get(call_id)
+        if call is None:
+            await websocket.close(code=1008)
+            return
+
+        await websocket.accept()
+        writer = RealtimeServerWriter(websocket)
+        await call.attach_sideband(writer)
+        try:
+            while True:
+                raw_text = await websocket.receive_text()
+                await call.controller.enqueue_text(raw_text, writer)
+        except WebSocketDisconnect:
+            logger.info("Realtime sideband websocket disconnected for call %s", call_id)
+        finally:
+            await call.detach_sideband(writer)
+        return
+
+    await websocket.accept()
     writer = RealtimeServerWriter(websocket)
+    broadcaster = BroadcastRealtimeSink([writer])
     service = container.realtime
-    parser = RealtimeClientParser()
-    registry = build_default_registry()
 
     try:
         session = service.create_session(
-            writer=writer,
+            writer=broadcaster,
             output_modalities=["text"],
             tools=[],
             chat_model=model,
@@ -41,44 +72,21 @@ async def realtime_endpoint_worker(
         await websocket.close(code=1011)
         return
 
-    ctx = RealtimeDispatchContext(session=session, service=service, model=model)
-
-    await service.emit_session_created(session, model)
-    worker_task = await service.start_transcription_worker(session, is_chat_model)
-
-    got_initial_update = False
+    controller = RealtimeSessionController(
+        session=session,
+        service=service,
+        model=model,
+        broadcaster=broadcaster,
+    )
 
     try:
+        await controller.start()
+        await service.emit_session_created(session, model, sink=writer)
         while True:
             raw_text = await websocket.receive_text()
-
-            try:
-                event = parser.parse_text(raw_text)
-            except ClientEventParseError as exc:
-                await writer.send_error(
-                    message=exc.message,
-                    error_type=exc.error_type,
-                    code=exc.code,
-                    event_ref=exc.event_id,
-                )
-                continue
-
-            if not got_initial_update:
-                if event.type != "session.update":
-                    await writer.send_error(
-                        message="First client event must be session.update",
-                        error_type="invalid_request_error",
-                        code="invalid_event_sequence",
-                        event_ref=getattr(event, "event_id", None),
-                    )
-                    await websocket.close(code=1008)
-                    return
-                got_initial_update = True
-
-            await registry.dispatch(event, ctx)
-
+            await controller.enqueue_text(raw_text, writer)
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected for session %s", session.session_id)
+        logger.info("Realtime websocket disconnected for session %s", session.session_id)
     except Exception as exc:  # pragma: no cover - defensive boundary
         logger.exception("Unhandled realtime websocket error: %s", exc)
         await writer.send_error(
@@ -87,9 +95,4 @@ async def realtime_endpoint_worker(
             code="internal_server_error",
         )
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
-        await service.close_session(session)
+        await controller.close()

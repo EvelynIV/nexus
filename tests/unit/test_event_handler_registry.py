@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from nexus.application.realtime.dispatch.context import RealtimeDispatchContext
@@ -25,7 +27,12 @@ async def test_registry_dispatches_registered_handler_and_fallback() -> None:
     registry.register("response.create", main_handler)
     registry.set_fallback(fallback_handler)
 
-    ctx = RealtimeDispatchContext(session=None, service=None, model="model")
+    ctx = RealtimeDispatchContext(
+        session=None,
+        service=None,
+        model="model",
+        reply_sink=SimpleNamespace(send_event=None, send_error=None),
+    )
 
     await registry.dispatch(parser.parse_text('{"type":"response.create"}'), ctx)
     await registry.dispatch(parser.parse_text('{"type":"response.cancel"}'), ctx)

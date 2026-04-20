@@ -630,7 +630,6 @@ function App() {
                 <p className="eyebrow">对话</p>
                 <h2>会话过程</h2>
               </div>
-              <span className="panel__hint">仅展示用户与助手消息</span>
             </div>
 
             <div className="chat-panel">
@@ -651,7 +650,6 @@ function App() {
                 <p className="eyebrow">检查器</p>
                 <h2>原始事件流</h2>
               </div>
-              <span className="panel__hint">按时间倒序显示入站、出站与系统诊断</span>
             </div>
 
             <div className="inspector">

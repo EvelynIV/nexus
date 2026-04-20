@@ -18,7 +18,7 @@ from nexus.sessions.chat_session import AsyncChatSession
 
 if TYPE_CHECKING:
     from asyncio import Task
-    from nexus.application.realtime.protocol.server_writer import RealtimeServerWriter
+    from nexus.application.realtime.protocol import RealtimeEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +29,9 @@ class RealtimeSessionState:
 
     chat_session: AsyncChatSession
     chat_model: str
-    writer: "RealtimeServerWriter"
+    writer: "RealtimeEventSink"
 
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str = field(default_factory=lambda: f"sess_{uuid.uuid4().hex}")
     tools: List[RealtimeFunctionTool] = field(default_factory=list)
     mcp_registry: McpToolRegistry = field(default_factory=McpToolRegistry)
 
@@ -43,11 +43,13 @@ class RealtimeSessionState:
     audio_output_voice: str = "alloy"
     audio_output_speed: float = 1.0
     audio_queue: asyncio.Queue[np.ndarray] = field(default_factory=asyncio.Queue)
+    audio_output_queue: asyncio.Queue[bytes | None] = field(default_factory=asyncio.Queue)
     _conversation_tail_item_id: Optional[str] = field(default=None, repr=False)
     _conversation_previous_item_ids: Dict[str, Optional[str]] = field(
         default_factory=dict,
         repr=False,
     )
+    _audio_voice_locked: bool = field(default=False, repr=False)
 
     _current_chat_task: Optional["Task"] = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -89,6 +91,13 @@ class RealtimeSessionState:
     def get_output_modalities(self) -> List[str]:
         return self.output_modalities.copy()
 
+    async def push_audio_output(self, pcm_bytes: bytes) -> None:
+        if pcm_bytes:
+            await self.audio_output_queue.put(bytes(pcm_bytes))
+
+    async def close_audio_output(self) -> None:
+        await self.audio_output_queue.put(None)
+
     def update_audio_output_config(
         self,
         *,
@@ -115,6 +124,12 @@ class RealtimeSessionState:
             "format_type": self.audio_input_format_type,
             "sample_rate": self.audio_input_sample_rate,
         }
+
+    def lock_audio_voice(self) -> None:
+        self._audio_voice_locked = True
+
+    def is_audio_voice_locked(self) -> bool:
+        return self._audio_voice_locked
 
     def register_server_conversation_item(self, item_id: str) -> Optional[str]:
         """Register a server-generated item in the conversation order chain."""

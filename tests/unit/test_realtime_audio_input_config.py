@@ -128,7 +128,12 @@ async def test_apply_session_update_rejects_invalid_input_rate_without_session_u
         },
     )
 
-    await service.apply_session_update(session, update, model="gpt-4o-realtime-preview")
+    await service.apply_session_update(
+        session,
+        update,
+        model="gpt-4o-realtime-preview",
+        reply_sink=writer,
+    )
 
     assert writer.send_error.await_count == 1
     assert session.send_event.await_count == 0

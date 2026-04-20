@@ -304,6 +304,10 @@ def _is_audio_mode(modalities: list[str]) -> bool:
     return "audio" in modalities
 
 
+def _is_text_mode(modalities: list[str]) -> bool:
+    return "text" in modalities
+
+
 async def process_chat_stream(
     session: "RealtimeSessionState",
     chat_stream: Iterable[ChatCompletionChunk],
@@ -348,6 +352,7 @@ async def process_chat_stream(
     """
     active_modalities = _modalities_or_default(modalities)
     audio_mode = _is_audio_mode(active_modalities)
+    text_mode = _is_text_mode(active_modalities)
 
     result = ChatStreamResult()
     text_ctx: Optional[TextResponseContext] = None
@@ -437,7 +442,7 @@ async def process_chat_stream(
                         )
                         await audio_ctx.__aenter__()
                     await audio_ctx.add_model_text_delta(display_delta, tts_delta=tts_delta)
-                else:
+                elif text_mode:
                     if not display_delta:
                         continue
                     # 延迟创建上下文，在第一个文本到达时才发送前置事件

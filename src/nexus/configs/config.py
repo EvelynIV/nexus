@@ -7,6 +7,9 @@ class NexusConfig:
     asr_grpc_addr: str
     chat_base_url: str
     chat_api_key: str
+    realtime_api_key: str | None = None
+    realtime_client_secret_ttl_seconds: int = 600
+    realtime_session_max_seconds: int = 3600
 
     tts_grpc_addr: str | None = None
     tts_grpc_preset_voice_id: str | None = None
@@ -45,3 +48,7 @@ class NexusConfig:
             raise ValueError("tts_grpc_decoder_chunk_size must be greater than 0")
         if self.tts_grpc_text_chunk_size <= 0:
             raise ValueError("tts_grpc_text_chunk_size must be greater than 0")
+        if self.realtime_client_secret_ttl_seconds <= 0:
+            raise ValueError("realtime_client_secret_ttl_seconds must be greater than 0")
+        if self.realtime_session_max_seconds <= 0:
+            raise ValueError("realtime_session_max_seconds must be greater than 0")

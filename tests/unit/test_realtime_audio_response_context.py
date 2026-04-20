@@ -147,8 +147,8 @@ async def test_audio_context_with_text_modalities_keeps_audio_transcript_events(
     assert "response.output_audio.done" in event_types
     assert "response.output_audio_transcript.delta" in event_types
     assert "response.output_audio_transcript.done" in event_types
-    assert "response.output_text.delta" not in event_types
-    assert "response.output_text.done" not in event_types
+    assert "response.output_text.delta" in event_types
+    assert "response.output_text.done" in event_types
     assert event_types.index("response.output_audio_transcript.delta") < event_types.index(
         "response.output_audio.delta"
     )

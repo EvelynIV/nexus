@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -16,6 +17,7 @@ from nexus.application.realtime.emitters.response_contexts import McpListToolsCo
 from nexus.application.realtime.orchestrators.response_orchestrator import (
     process_chat_stream,
 )
+from nexus.application.realtime.protocol import NullRealtimeReplySink, RealtimeReplySink
 from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
 from nexus.application.realtime.orchestrators.tool_call_orchestrator import (
     execute_mcp_tool_call,
@@ -79,6 +81,7 @@ class RealtimeApplicationService:
         output_modalities: Sequence[str],
         tools: Sequence[RealtimeFunctionTool],
         chat_model: str,
+        session_id: Optional[str] = None,
     ) -> RealtimeSessionState:
         if "transcribe" not in chat_model.lower() and self.chat_inferencer is None:
             raise RuntimeError(
@@ -94,12 +97,19 @@ class RealtimeApplicationService:
             chat_session=chat_session,
             chat_model=chat_model,
             writer=writer,
+            session_id=session_id or f"sess_{uuid.uuid4().hex}",
             output_modalities=normalized_modalities,
             tools=list(tools),
         )
 
-    async def emit_session_created(self, session: RealtimeSessionState, model: str) -> None:
-        await session.send_event(
+    async def emit_session_created(
+        self,
+        session: RealtimeSessionState,
+        model: str,
+        sink=None,
+    ) -> None:
+        target = sink or session
+        await target.send_event(
             SessionCreatedEvent(
                 type="session.created",
                 event_id=event_id(),
@@ -110,33 +120,42 @@ class RealtimeApplicationService:
             )
         )
 
-    async def apply_session_update(self, session: RealtimeSessionState, update, *, model: str) -> None:
+    async def apply_session_update(
+        self,
+        session: RealtimeSessionState,
+        update,
+        *,
+        model: str,
+        reply_sink: RealtimeReplySink | None = None,
+        emit_event: bool = True,
+    ) -> None:
+        reply_sink = reply_sink or NullRealtimeReplySink()
         if model:
             session.chat_model = model
 
         try:
             self._validate_audio_input_update(update)
         except ValueError as exc:
-            await session.writer.send_error(
+            await reply_sink.send_error(
                 message=str(exc),
                 error_type="invalid_request_error",
                 code="invalid_audio_input_format",
             )
             return
 
-        output_modalities = getattr(update, "output_modalities", None)
+        output_modalities = self._get_update_field(update, "output_modalities")
         if output_modalities is not None:
             try:
                 normalized_modalities = self._normalize_output_modalities(list(output_modalities))
             except ValueError as exc:
-                await session.writer.send_error(
+                await reply_sink.send_error(
                     message=str(exc),
                     error_type="invalid_request_error",
                     code="invalid_output_modalities",
                 )
             else:
                 if "audio" in normalized_modalities and self.tts_backend is None:
-                    await session.writer.send_error(
+                    await reply_sink.send_error(
                         message=(
                             "TTS backend is not configured. "
                             "Configure tts_backend for realtime audio output."
@@ -150,26 +169,27 @@ class RealtimeApplicationService:
         try:
             self._apply_audio_output_update(session, update)
         except ValueError as exc:
-            await session.writer.send_error(
+            await reply_sink.send_error(
                 message=str(exc),
                 error_type="invalid_request_error",
                 code="invalid_audio_output_format",
             )
             return
 
-        raw_tools = getattr(update, "tools", None)
+        raw_tools = self._get_update_field(update, "tools")
         if raw_tools is not None:
             function_tools, mcp_configs = self._split_tools(raw_tools)
             session.tools = function_tools
-            await self._sync_mcp_servers(session, mcp_configs)
+            await self._sync_mcp_servers(session, mcp_configs, reply_sink=reply_sink)
 
-        await session.send_event(
-            SessionUpdatedEvent(
-                type="session.updated",
-                event_id=event_id(),
-                session=self._session_payload(session=session, model=model),
+        if emit_event:
+            await session.send_event(
+                SessionUpdatedEvent(
+                    type="session.updated",
+                    event_id=event_id(),
+                    session=self._session_payload(session=session, model=model),
+                )
             )
-        )
 
     async def start_transcription_worker(
         self,
@@ -213,14 +233,21 @@ class RealtimeApplicationService:
                 result.tool_call.name,
             )
 
-    async def generate_response(self, session: RealtimeSessionState, event=None) -> None:
+    async def generate_response(
+        self,
+        session: RealtimeSessionState,
+        event=None,
+        *,
+        reply_sink: RealtimeReplySink | None = None,
+    ) -> None:
+        reply_sink = reply_sink or NullRealtimeReplySink()
         try:
             response_cfg = self._resolve_response_config(
                 session=session,
                 response=getattr(event, "response", None),
             )
         except ValueError as exc:
-            await session.writer.send_error(
+            await reply_sink.send_error(
                 message=str(exc),
                 error_type="invalid_request_error",
                 code="invalid_output_modalities",
@@ -229,7 +256,7 @@ class RealtimeApplicationService:
 
         if "audio" in response_cfg.modalities:
             if self.tts_backend is None:
-                await session.writer.send_error(
+                await reply_sink.send_error(
                     message=(
                         "TTS backend is not configured. "
                         "Configure tts_backend for realtime audio output."
@@ -241,7 +268,7 @@ class RealtimeApplicationService:
             try:
                 self._ensure_audio_output_supported(response_cfg.audio_format_type)
             except ValueError as exc:
-                await session.writer.send_error(
+                await reply_sink.send_error(
                     message=str(exc),
                     error_type="invalid_request_error",
                     code="unsupported_audio_output_format",
@@ -267,10 +294,23 @@ class RealtimeApplicationService:
                 result.tool_call.name,
             )
 
-    async def handle_response_create(self, session: RealtimeSessionState, event) -> None:
-        asyncio.create_task(self.generate_response(session, event))
+    async def handle_response_create(
+        self,
+        session: RealtimeSessionState,
+        event,
+        *,
+        reply_sink: RealtimeReplySink | None = None,
+    ) -> None:
+        asyncio.create_task(self.generate_response(session, event, reply_sink=reply_sink))
 
-    async def handle_response_cancel(self, session: RealtimeSessionState, _event) -> None:
+    async def handle_response_cancel(
+        self,
+        session: RealtimeSessionState,
+        _event,
+        *,
+        reply_sink: RealtimeReplySink | None = None,
+    ) -> None:
+        del reply_sink
         session.request_cancel(reason="client_cancelled")
         task = session.get_current_chat_task()
         if task and not task.done():
@@ -297,15 +337,12 @@ class RealtimeApplicationService:
                 f"Unsupported output modalities: {sorted(unsupported)}. Allowed values: ['audio', 'text']"
             )
 
-        if len(normalized) > 1:
-            raise ValueError(
-                "Passing both 'audio' and 'text' in output_modalities is not allowed. "
-                "Please pass only one modality."
-            )
-
+        ordered: list[str] = []
         if "audio" in normalized:
-            return ["audio"]
-        return ["text"]
+            ordered.append("audio")
+        if "text" in normalized:
+            ordered.append("text")
+        return ordered
 
     def _ensure_audio_output_supported(self, format_type: str) -> None:
         if format_type != self.REALTIME_PCM_FORMAT:
@@ -344,7 +381,7 @@ class RealtimeApplicationService:
         return {}
 
     def _validate_audio_input_update(self, update) -> None:
-        audio_config = update.get("audio") if isinstance(update, dict) else getattr(update, "audio", None)
+        audio_config = self._get_update_field(update, "audio")
         if audio_config is None:
             return
 
@@ -377,7 +414,7 @@ class RealtimeApplicationService:
             )
 
     def _apply_audio_output_update(self, session: RealtimeSessionState, update) -> None:
-        audio_config = getattr(update, "audio", None)
+        audio_config = self._get_update_field(update, "audio")
         if audio_config is None:
             return
 
@@ -399,12 +436,22 @@ class RealtimeApplicationService:
 
         if format_type is not None:
             self._ensure_audio_output_supported(format_type)
+        if voice is not None and session.is_audio_voice_locked() and voice != session.audio_output_voice:
+            raise ValueError(
+                "Audio output voice cannot be changed after the session has emitted audio."
+            )
 
         session.update_audio_output_config(
             format_type=format_type,
             voice=voice,
             speed=speed,
         )
+
+    @staticmethod
+    def _get_update_field(update, field: str):
+        if isinstance(update, dict):
+            return update.get(field)
+        return getattr(update, field, None)
 
     def _resolve_response_config(self, session: RealtimeSessionState, response=None) -> EffectiveResponseConfig:
         modalities = session.get_output_modalities()
@@ -441,7 +488,16 @@ class RealtimeApplicationService:
                     if format_type:
                         audio_format_type = format_type
                     if output_data.get("voice"):
+                        if (
+                            session.is_audio_voice_locked()
+                            and output_data["voice"] != session_audio_cfg["voice"]
+                        ):
+                            raise ValueError(
+                                "Audio output voice cannot be changed after the session has emitted audio."
+                            )
                         audio_voice = output_data["voice"]
+                    if output_data.get("speed") is not None:
+                        audio_speed = output_data["speed"]
 
         return EffectiveResponseConfig(
             modalities=modalities,
@@ -478,7 +534,10 @@ class RealtimeApplicationService:
         self,
         session: RealtimeSessionState,
         configs: Sequence[McpServerConfig],
+        *,
+        reply_sink: RealtimeReplySink | None = None,
     ) -> None:
+        reply_sink = reply_sink or NullRealtimeReplySink()
         target_labels = {config.server_label for config in configs}
         current_labels = set(session.mcp_registry.server_labels)
 
@@ -494,7 +553,7 @@ class RealtimeApplicationService:
                     config.server_label,
                     exc,
                 )
-                await session.writer.send_error(
+                await reply_sink.send_error(
                     message=f"Failed to connect MCP server '{config.server_label}': {exc}",
                     error_type="server_error",
                     code="mcp_connection_error",
