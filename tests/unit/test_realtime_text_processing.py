@@ -9,10 +9,10 @@ import pytest
 from nexus.application.realtime.orchestrators.response_orchestrator import process_chat_stream
 from nexus.application.realtime.text_processing import (
     SanitizedModelOutputAccumulator,
-    parse_asr_speaker_prefix,
     prepare_realtime_user_turn,
 )
 from nexus.domain.realtime.session_state import RealtimeSessionState
+from nexus.infrastructure.asr import TranscriptionResult
 
 
 class _FakeChatSession:
@@ -37,6 +37,8 @@ class _FakeChatSession:
 class _CollectingSession:
     events: list[Any] = field(default_factory=list)
     replacements: list[str] = field(default_factory=list)
+    _conversation_tail_item_id: str | None = None
+    _conversation_previous_item_ids: dict[str, str | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.chat_session = SimpleNamespace(
@@ -62,6 +64,14 @@ class _CollectingSession:
     def get_cancel_reason(self) -> str:
         return "turn_detected"
 
+    def register_server_conversation_item(self, item_id: str) -> str | None:
+        if item_id in self._conversation_previous_item_ids:
+            return self._conversation_previous_item_ids[item_id]
+        previous_item_id = self._conversation_tail_item_id
+        self._conversation_previous_item_ids[item_id] = previous_item_id
+        self._conversation_tail_item_id = item_id
+        return previous_item_id
+
 
 async def _noop_async(**kwargs) -> None:
     del kwargs
@@ -78,36 +88,56 @@ def _make_chunk(content: str, *, finish_reason: str | None = None):
     )
 
 
-def test_parse_asr_speaker_prefix_extracts_voiceprint_name() -> None:
-    speaker_name, display_transcript = parse_asr_speaker_prefix(
-        "<sid migo 0.56> 来给我讲个有趣的故事吧"
+def test_prepare_realtime_user_turn_uses_speaker_name_for_model_context() -> None:
+    turn = prepare_realtime_user_turn(
+        TranscriptionResult(
+            transcript="来给我讲个有趣的故事吧",
+            is_final=True,
+            speaker_id="speaker-123",
+            speaker_name="migo",
+            speaker_confidence=0.56,
+            metadata={"emotion": "happy"},
+            speaker_changed=True,
+            turn_completed=True,
+        )
     )
 
-    assert speaker_name == "migo"
-    assert display_transcript == "来给我讲个有趣的故事吧"
-
-
-def test_parse_asr_speaker_prefix_ignores_others() -> None:
-    speaker_name, display_transcript = parse_asr_speaker_prefix("<sid <others>> 你好")
-
-    assert speaker_name is None
-    assert display_transcript == "你好"
-
-
-def test_prepare_realtime_user_turn_keeps_invalid_prefix_unchanged() -> None:
-    turn = prepare_realtime_user_turn("<sid broken> 你好")
-
-    assert turn.speaker_name is None
-    assert turn.display_transcript == "<sid broken> 你好"
-    assert turn.model_text == "<sid broken> 你好"
-
-
-def test_prepare_realtime_user_turn_injects_hidden_speaker_context() -> None:
-    turn = prepare_realtime_user_turn("<sid migo 0.56> 来给我讲个有趣的故事吧")
-
+    assert turn.raw_transcript == "来给我讲个有趣的故事吧"
     assert turn.display_transcript == "来给我讲个有趣的故事吧"
+    assert turn.speaker_id == "speaker-123"
+    assert turn.speaker_name == "migo"
+    assert turn.speaker_confidence == pytest.approx(0.56)
+    assert turn.metadata == {"emotion": "happy"}
+    assert turn.speaker_changed is True
+    assert turn.turn_completed is True
     assert "当前说话人是migo" in turn.model_text
     assert "用户说：来给我讲个有趣的故事吧" in turn.model_text
+
+
+def test_prepare_realtime_user_turn_falls_back_to_speaker_id() -> None:
+    turn = prepare_realtime_user_turn(
+        TranscriptionResult(
+            transcript="你好",
+            is_final=True,
+            speaker_id="speaker-456",
+        )
+    )
+
+    assert turn.display_transcript == "你好"
+    assert turn.speaker_name is None
+    assert "当前说话人是speaker-456" in turn.model_text
+
+
+def test_prepare_realtime_user_turn_without_speaker_keeps_transcript() -> None:
+    turn = prepare_realtime_user_turn(
+        TranscriptionResult(
+            transcript="直接按原文处理",
+            is_final=True,
+        )
+    )
+
+    assert turn.display_transcript == "直接按原文处理"
+    assert turn.model_text == "直接按原文处理"
 
 
 def test_sanitized_output_accumulator_strips_markdown_symbols_and_emoji() -> None:
@@ -158,7 +188,13 @@ async def test_realtime_session_chat_uses_prepared_turn_model_text() -> None:
         chat_model="gpt-4o-realtime-preview",
         writer=SimpleNamespace(send_event=_noop_async),
     )
-    turn = prepare_realtime_user_turn("<sid migo 0.56> 给我讲个故事")
+    turn = prepare_realtime_user_turn(
+        TranscriptionResult(
+            transcript="给我讲个故事",
+            is_final=True,
+            speaker_name="migo",
+        )
+    )
 
     async for _ in session.chat(turn):
         pass

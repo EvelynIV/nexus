@@ -12,23 +12,6 @@ from nexus.application.tts import TextToSpeechUseCase
 from nexus.infrastructure.tts.backend import DuplexAudioChunk
 
 
-class FakeStreamBackend:
-    supports_duplex = False
-
-    async def speech_stream(
-        self,
-        *,
-        text: str,
-        model: str,
-        voice: str,
-        response_format: str,
-        speed: float,
-        **kwargs,
-    ):
-        del model, voice, response_format, speed, kwargs
-        yield text.encode("utf-8")
-
-
 class FakeDuplexSession:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[DuplexAudioChunk | None] = asyncio.Queue()
@@ -89,25 +72,6 @@ def _build_client(tts_use_case: TextToSpeechUseCase) -> TestClient:
     app.include_router(router)
     app.dependency_overrides[get_container] = lambda: SimpleNamespace(tts=tts_use_case)
     return TestClient(app)
-
-
-def test_audio_speech_openai_backend_streams_audio() -> None:
-    client = _build_client(TextToSpeechUseCase(backend=FakeStreamBackend()))
-
-    with client.stream(
-        "POST",
-        "/audio/speech",
-        json={
-            "input": "hello",
-            "voice": "alloy",
-            "response_format": "pcm",
-            "speed": 1.0,
-        },
-    ) as response:
-        body = b"".join(response.iter_bytes())
-
-    assert response.status_code == 200
-    assert body == b"hello"
 
 
 def test_audio_speech_grpc_backend_streams_pcm() -> None:

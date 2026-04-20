@@ -371,12 +371,14 @@ def build_output_item_added_event(
 def build_conversation_item_added_event(
     item: conversation_item.RealtimeConversationItemAssistantMessage,
     event_id: str,
+    previous_item_id: Optional[str] = None,
 ) -> ConversationItemAdded:
     """构建 conversation.item.added 事件"""
     return ConversationItemAdded(
         event_id=event_id,
         item=item,
         type="conversation.item.added",
+        previous_item_id=previous_item_id,
     )
 
 
@@ -582,12 +584,14 @@ def build_audio_content_part_done_event(
 def build_conversation_item_done_event(
     item: conversation_item.RealtimeConversationItemAssistantMessage,
     event_id: str,
+    previous_item_id: Optional[str] = None,
 ) -> ConversationItemDone:
     """构建 conversation.item.done 事件"""
     return ConversationItemDone(
         event_id=event_id,
         item=item,
         type="conversation.item.done",
+        previous_item_id=previous_item_id,
     )
 
 

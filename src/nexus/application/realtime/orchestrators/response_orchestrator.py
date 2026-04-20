@@ -11,7 +11,6 @@ from nexus.infrastructure.asr import TranscriptionResult
 from nexus.application.realtime.protocol.ids import event_id, item_id
 from nexus.application.realtime.text_processing import (
     SanitizedModelOutputAccumulator,
-    prepare_realtime_user_turn,
 )
 from nexus.application.realtime.emitters.response_contexts import (
     AudioResponseContext,
@@ -108,8 +107,6 @@ async def send_transcribe_interim(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: TranscriptionStreamTracker,
-    *,
-    hide_metadata: bool = True,
 ) -> None:
     """Send streaming delta events for an interim (non-final) ASR result."""
 
@@ -129,12 +126,7 @@ async def send_transcribe_interim(
         tracker.mark_speech_started()
 
     # 计算增量 delta
-    event_transcript = (
-        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
-        if hide_metadata
-        else transcription_result.transcript
-    )
-    delta = tracker.compute_delta(event_transcript)
+    delta = tracker.compute_delta(transcription_result.transcript)
     if not delta:
         return
 
@@ -157,8 +149,6 @@ async def send_transcribe_response(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: Optional[TranscriptionStreamTracker] = None,
-    *,
-    hide_metadata: bool = True,
 ):
     """Complete the transcription event sequence for a final ASR result.
 
@@ -177,11 +167,7 @@ async def send_transcribe_response(
         )
         return
 
-    transcript = (
-        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
-        if hide_metadata
-        else transcription_result.transcript
-    )
+    transcript = transcription_result.transcript
 
     # Determine item_id – reuse from tracker if available
     if tracker is not None:
@@ -214,10 +200,12 @@ async def send_transcribe_response(
     await session.send_event(vad_stop_event)
 
     # committed
+    previous_item_id = session.register_server_conversation_item(response_item_id)
     committed_event = realtime.InputAudioBufferCommittedEvent(
         event_id=event_id(),
         item_id=response_item_id,
         type="input_audio_buffer.committed",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(committed_event)
 
@@ -258,11 +246,17 @@ async def send_transcribe_response(
         status="completed",
     )
     conversation_add_event = realtime.ConversationItemAdded(
-        event_id=event_id(), item=item, type="conversation.item.added"
+        event_id=event_id(),
+        item=item,
+        type="conversation.item.added",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(conversation_add_event)
     conversation_done_event = realtime.ConversationItemDone(
-        event_id=event_id(), item=item, type="conversation.item.done"
+        event_id=event_id(),
+        item=item,
+        type="conversation.item.done",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(conversation_done_event)
 

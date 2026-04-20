@@ -50,14 +50,12 @@ class RealtimeApplicationService:
         self,
         grpc_addr: str,
         interim_results: bool = False,
-        asr_hide_metadata: bool = True,
         chat_base_url: Optional[str] = None,
         chat_api_key: Optional[str] = None,
         tts_backend: Optional[TTSBackend] = None,
     ):
         self.grpc_addr = grpc_addr
         self.interim_results = interim_results
-        self.asr_hide_metadata = asr_hide_metadata
         self.asr_inferencer = ASRInferencer(self.grpc_addr)
         self.chat_inferencer = (
             AsyncChatInferencer(api_key=chat_api_key, base_url=chat_base_url)
@@ -183,7 +181,6 @@ class RealtimeApplicationService:
                 inferencer=self.asr_inferencer,
                 session=session,
                 interim_results=self.interim_results,
-                hide_metadata=self.asr_hide_metadata,
                 is_chat_model=is_chat_model,
                 chat_worker=self.chat_worker,
             )

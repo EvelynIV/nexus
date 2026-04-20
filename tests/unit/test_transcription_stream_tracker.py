@@ -93,9 +93,20 @@ class FakeSession:
     """Minimal stand-in for RealtimeSessionState."""
 
     events: List[Any] = field(default_factory=list)
+    _conversation_tail_item_id: str | None = None
+    _conversation_previous_item_ids: dict[str, str | None] = field(default_factory=dict)
 
     async def send_event(self, event: Any) -> None:
         self.events.append(event)
+
+    def register_server_conversation_item(self, item_id: str) -> str | None:
+        if item_id in self._conversation_previous_item_ids:
+            return self._conversation_previous_item_ids[item_id]
+
+        previous_item_id = self._conversation_tail_item_id
+        self._conversation_previous_item_ids[item_id] = previous_item_id
+        self._conversation_tail_item_id = item_id
+        return previous_item_id
 
 
 def _make_result(transcript: str, is_final: bool, words=None) -> TranscriptionResult:
@@ -248,6 +259,45 @@ class TestSendTranscribeResponseWithTracker:
         ]
         assert delta_events[0].delta == "你好"
 
+        committed_event = next(
+            e for e in session.events if e.type == "input_audio_buffer.committed"
+        )
+        added_event = next(
+            e for e in session.events if e.type == "conversation.item.added"
+        )
+        done_event = next(
+            e for e in session.events if e.type == "conversation.item.done"
+        )
+        assert committed_event.previous_item_id is None
+        assert added_event.previous_item_id is None
+        assert done_event.previous_item_id is None
+
+    @pytest.mark.asyncio
+    async def test_consecutive_finals_share_previous_item_id_chain(self):
+        session = FakeSession()
+        tracker = TranscriptionStreamTracker()
+
+        await send_transcribe_response(session, _make_result("first", True), tracker)
+        first_done = next(
+            e for e in session.events if e.type == "conversation.item.done"
+        )
+        session.events.clear()
+
+        await send_transcribe_response(session, _make_result("second", True), tracker)
+
+        committed_event = next(
+            e for e in session.events if e.type == "input_audio_buffer.committed"
+        )
+        added_event = next(
+            e for e in session.events if e.type == "conversation.item.added"
+        )
+        done_event = next(
+            e for e in session.events if e.type == "conversation.item.done"
+        )
+        assert committed_event.previous_item_id == first_done.item.id
+        assert added_event.previous_item_id == first_done.item.id
+        assert done_event.previous_item_id == first_done.item.id
+
     @pytest.mark.asyncio
     async def test_tracker_reset_after_final(self):
         """After final, tracker should be clean for the next utterance."""
@@ -276,13 +326,13 @@ class TestSendTranscribeResponseWithTracker:
         assert "conversation.item.input_audio_transcription.completed" in types
 
     @pytest.mark.asyncio
-    async def test_final_transcript_strips_sid_prefix_from_client_events(self):
+    async def test_final_transcript_is_forwarded_to_client_verbatim(self):
         session = FakeSession()
         tracker = TranscriptionStreamTracker()
 
         await send_transcribe_response(
             session,
-            _make_result("<sid migo 0.56> 来给我讲个故事", True, [("来给我讲个故事", 0.0, 0.5)]),
+            _make_result("migo: 来给我讲个故事", True, [("来给我讲个故事", 0.0, 0.5)]),
             tracker,
         )
 
@@ -295,43 +345,8 @@ class TestSendTranscribeResponseWithTracker:
             if e.type == "conversation.item.input_audio_transcription.completed"
         ]
 
-        assert delta_events[0].delta == "来给我讲个故事"
-        assert completed_events[0].transcript == "来给我讲个故事"
-
-    @pytest.mark.asyncio
-    async def test_others_sid_prefix_is_ignored_for_client_transcript(self):
-        session = FakeSession()
-        tracker = TranscriptionStreamTracker()
-
-        await send_transcribe_response(
-            session,
-            _make_result("<sid <others>> 你好", True, [("你好", 0.0, 0.5)]),
-            tracker,
-        )
-
-        completed_events = [
-            e for e in session.events
-            if e.type == "conversation.item.input_audio_transcription.completed"
-        ]
-        assert completed_events[0].transcript == "你好"
-
-    @pytest.mark.asyncio
-    async def test_hide_metadata_false_keeps_sid_prefix_for_client_transcript(self):
-        session = FakeSession()
-        tracker = TranscriptionStreamTracker()
-
-        await send_transcribe_response(
-            session,
-            _make_result("<sid migo 0.56> 来给我讲个故事", True, [("来给我讲个故事", 0.0, 0.5)]),
-            tracker,
-            hide_metadata=False,
-        )
-
-        completed_events = [
-            e for e in session.events
-            if e.type == "conversation.item.input_audio_transcription.completed"
-        ]
-        assert completed_events[0].transcript == "<sid migo 0.56> 来给我讲个故事"
+        assert delta_events[0].delta == "migo: 来给我讲个故事"
+        assert completed_events[0].transcript == "migo: 来给我讲个故事"
 
     @pytest.mark.asyncio
     async def test_item_id_consistent_interim_to_final(self):

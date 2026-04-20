@@ -5,7 +5,7 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 from openai.types.chat import ChatCompletionChunk
@@ -43,6 +43,11 @@ class RealtimeSessionState:
     audio_output_voice: str = "alloy"
     audio_output_speed: float = 1.0
     audio_queue: asyncio.Queue[np.ndarray] = field(default_factory=asyncio.Queue)
+    _conversation_tail_item_id: Optional[str] = field(default=None, repr=False)
+    _conversation_previous_item_ids: Dict[str, Optional[str]] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     _current_chat_task: Optional["Task"] = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -110,6 +115,20 @@ class RealtimeSessionState:
             "format_type": self.audio_input_format_type,
             "sample_rate": self.audio_input_sample_rate,
         }
+
+    def register_server_conversation_item(self, item_id: str) -> Optional[str]:
+        """Register a server-generated item in the conversation order chain."""
+        if item_id in self._conversation_previous_item_ids:
+            return self._conversation_previous_item_ids[item_id]
+
+        previous_item_id = self._conversation_tail_item_id
+        self._conversation_previous_item_ids[item_id] = previous_item_id
+        self._conversation_tail_item_id = item_id
+        return previous_item_id
+
+    def get_registered_previous_item_id(self, item_id: str) -> Optional[str]:
+        """Return the registered predecessor for a conversation item."""
+        return self._conversation_previous_item_ids.get(item_id)
 
     def get_all_tools(self) -> List[RealtimeFunctionTool]:
         all_tools = list(self.tools)

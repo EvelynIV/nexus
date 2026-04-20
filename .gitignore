@@ -130,6 +130,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Node / pnpm
+node_modules/
+.pnpm-store/
+.npm/
+pnpm-debug.log*
+*.tsbuildinfo
+
 # Spyder project settings
 .spyderproject
 .spyproject

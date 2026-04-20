@@ -55,7 +55,11 @@ class _FakeInferencer:
         async for chunk in audio:
             self.collected.append(chunk)
 
-        yield TranscriptionResult(transcript="ok", is_final=True)
+        yield TranscriptionResult(
+            transcript="ok",
+            is_final=True,
+            words=[("ok", 0.0, 0.5)],
+        )
 
 
 @pytest.mark.asyncio

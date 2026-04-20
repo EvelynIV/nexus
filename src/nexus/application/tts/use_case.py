@@ -20,16 +20,7 @@ class TextToSpeechUseCase:
         response_format: str,
         speed: float,
     ) -> AsyncIterator[bytes]:
-        if getattr(self.backend, "supports_duplex", False):
-            return await self._stream_grpc_backend_audio(
-                text=text,
-                model=model,
-                voice=voice,
-                response_format=response_format,
-                speed=speed,
-            )
-
-        return self.backend.speech_stream(
+        return await self._stream_grpc_backend_audio(
             text=text,
             model=model,
             voice=voice,

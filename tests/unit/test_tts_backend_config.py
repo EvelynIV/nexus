@@ -5,7 +5,7 @@ import wave
 import pytest
 
 from nexus.configs.config import NexusConfig
-from nexus.infrastructure.tts import GrpcDuplexTTSBackend, OpenAITTSBackend, create_tts_backend
+from nexus.infrastructure.tts import GrpcDuplexTTSBackend, create_tts_backend
 
 
 def _base_kwargs() -> dict:
@@ -25,25 +25,9 @@ def _write_test_wav(path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_tts_backend_configuration_is_valid() -> None:
-    config = NexusConfig(
-        **_base_kwargs(),
-        tts_backend="openai",
-        tts_base_url="http://localhost:10003/v1",
-        tts_api_key="no-key",
-    )
-
-    backend = create_tts_backend(config)
-
-    assert isinstance(backend, OpenAITTSBackend)
-    await backend.close()
-
-
-@pytest.mark.asyncio
 async def test_grpc_tts_backend_configuration_is_valid_with_preset_voice() -> None:
     config = NexusConfig(
         **_base_kwargs(),
-        tts_backend="grpc",
         tts_grpc_addr="localhost:30036",
         tts_grpc_preset_voice_id="speaker-1",
     )
@@ -68,7 +52,6 @@ async def test_grpc_tts_backend_configuration_is_valid_with_reference_voice_dir(
 
     config = NexusConfig(
         **_base_kwargs(),
-        tts_backend="grpc",
         tts_grpc_addr="localhost:30036",
         tts_grpc_ref_voice_dir=str(voice_dir),
     )
@@ -83,8 +66,15 @@ def test_grpc_tts_backend_requires_voice_source() -> None:
     with pytest.raises(ValueError, match="voice source"):
         NexusConfig(
             **_base_kwargs(),
-            tts_backend="grpc",
             tts_grpc_addr="localhost:30036",
+        )
+
+
+def test_grpc_tts_backend_requires_grpc_addr() -> None:
+    with pytest.raises(ValueError, match="tts_grpc_addr is required"):
+        NexusConfig(
+            **_base_kwargs(),
+            tts_grpc_preset_voice_id="speaker-1",
         )
 
 
@@ -100,7 +90,6 @@ def test_grpc_tts_backend_rejects_conflicting_voice_sources(tmp_path) -> None:
     with pytest.raises(ValueError, match="exactly one"):
         NexusConfig(
             **_base_kwargs(),
-            tts_backend="grpc",
             tts_grpc_addr="localhost:30036",
             tts_grpc_preset_voice_id="speaker-1",
             tts_grpc_ref_voice_dir=str(voice_dir),

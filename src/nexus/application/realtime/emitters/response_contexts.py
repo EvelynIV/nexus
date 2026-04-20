@@ -96,6 +96,7 @@ class TextResponseContext:
         self._content = ""
         # 助手消息 item
         self._item = None
+        self._previous_item_id = None
     
     @property
     def content(self) -> str:
@@ -119,6 +120,9 @@ class TextResponseContext:
             item_id=self.item_id,
             status="in_progress",
         )
+        self._previous_item_id = self.session.register_server_conversation_item(
+            self.item_id
+        )
         
         # 3. Output item added
         await self.session.send_event(
@@ -134,6 +138,7 @@ class TextResponseContext:
             build_conversation_item_added_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -204,6 +209,7 @@ class TextResponseContext:
             build_conversation_item_done_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -301,6 +307,7 @@ class AudioResponseContext:
         self._duplex_audio_failed = False
         self._audio_started = False
         self._pending_transcript_deltas: list[str] = []
+        self._previous_item_id = None
 
         # 流式重采样：当上游 TTS 采样率与输出不一致时启用
         _in_rate = tts_sample_rate or self.TTS_INPUT_SAMPLE_RATE
@@ -343,6 +350,9 @@ class AudioResponseContext:
         )
 
         self._item = build_assistant_message_item(item_id=self.item_id, status="in_progress")
+        self._previous_item_id = self.session.register_server_conversation_item(
+            self.item_id
+        )
         await self.session.send_event(
             build_output_item_added_event(
                 item=self._item,
@@ -354,6 +364,7 @@ class AudioResponseContext:
             build_conversation_item_added_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         await self.session.send_event(
@@ -389,10 +400,7 @@ class AudioResponseContext:
             await self._duplex_session.send_text(tts_delta)
         if not self.include_transcript or not delta:
             return
-        if self._audio_started:
-            await self._emit_transcript_delta(delta)
-            return
-        self._pending_transcript_deltas.append(delta)
+        await self._emit_transcript_delta(delta)
 
     async def _consume_duplex_audio(self) -> None:
         if self._duplex_session is None:
@@ -432,7 +440,6 @@ class AudioResponseContext:
         self._audio_delta_count += 1
         if is_first_audio_delta:
             self._audio_started = True
-            await self._flush_pending_transcript_deltas()
 
     async def _send_audio_bytes(self, audio_bytes: bytes) -> None:
         """接收上游 TTS 原始音频，经流式重采样后发送。"""
@@ -493,7 +500,7 @@ class AudioResponseContext:
             )
         )
 
-        transcript = self._display_text if self.include_transcript and self._audio_started else None
+        transcript = self._display_text if self.include_transcript and self._display_text else None
         if transcript is not None:
             await self.session.send_event(
                 build_audio_transcript_done_event(
@@ -538,6 +545,7 @@ class AudioResponseContext:
             build_conversation_item_done_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
 
@@ -627,15 +635,6 @@ class AudioResponseContext:
             )
         )
 
-    async def _flush_pending_transcript_deltas(self) -> None:
-        if not self.include_transcript or not self._pending_transcript_deltas:
-            return
-        pending = self._pending_transcript_deltas
-        self._pending_transcript_deltas = []
-        for delta in pending:
-            await self._emit_transcript_delta(delta)
-
-
 class FunctionCallResponseContext:
     """
     工具调用响应上下文管理器。
@@ -680,6 +679,7 @@ class FunctionCallResponseContext:
         self._arguments = ""
         # function call item
         self._item = None
+        self._previous_item_id = None
     
     @property
     def arguments(self) -> str:
@@ -706,6 +706,9 @@ class FunctionCallResponseContext:
             item_id=self.item_id,
             status="in_progress",
         )
+        self._previous_item_id = self.session.register_server_conversation_item(
+            self.item_id
+        )
         
         # 3. Output item added
         await self.session.send_event(
@@ -721,6 +724,7 @@ class FunctionCallResponseContext:
             build_function_call_conversation_item_added_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -753,6 +757,7 @@ class FunctionCallResponseContext:
             build_function_call_conversation_item_done_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -832,6 +837,7 @@ class McpListToolsContext:
         self._tools: List[Dict[str, Any]] = []
         # item
         self._item = None
+        self._previous_item_id = None
     
     @property
     def tools(self) -> List[Dict[str, Any]]:
@@ -849,12 +855,16 @@ class McpListToolsContext:
             server_label=self.server_label,
             tools=[],
         )
+        self._previous_item_id = self.session.register_server_conversation_item(
+            self.item_id
+        )
         
         # 2. Conversation item added
         await self.session.send_event(
             build_mcp_list_tools_added_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -899,6 +909,7 @@ class McpListToolsContext:
             build_mcp_list_tools_done_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -965,6 +976,7 @@ class McpCallResponseContext:
         self._error: str = None
         # mcp_call item
         self._item = None
+        self._previous_item_id = None
         # 是否已完成参数
         self._arguments_finished = False
     
@@ -1003,6 +1015,9 @@ class McpCallResponseContext:
             arguments="",
             server_label=self.server_label,
         )
+        self._previous_item_id = self.session.register_server_conversation_item(
+            self.item_id
+        )
         
         # 3. Output item added
         await self.session.send_event(
@@ -1018,6 +1033,7 @@ class McpCallResponseContext:
             build_mcp_call_conversation_item_added_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         
@@ -1110,6 +1126,7 @@ class McpCallResponseContext:
             build_mcp_call_conversation_item_done_event(
                 item=self._item,
                 event_id=event_id(),
+                previous_item_id=self._previous_item_id,
             )
         )
         

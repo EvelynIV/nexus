@@ -19,12 +19,25 @@ from nexus.infrastructure.asr import AsyncInferencer
 logger = logging.getLogger(__name__)
 
 
+def _should_skip_asr_result(asr_result) -> bool:
+    end_time = asr_result.get_end_time()
+    if asr_result.is_final:
+        return False
+    if end_time > 0:
+        return False
+    logger.info(
+        "Skipping non-final ASR result with non-positive end timestamp: end_time=%s transcript=%r",
+        end_time,
+        asr_result.transcript,
+    )
+    return True
+
+
 async def run_transcription_worker(
     *,
     inferencer: AsyncInferencer,
     session: RealtimeSessionState,
     interim_results: bool,
-    hide_metadata: bool = True,
     is_chat_model: bool,
     chat_worker: Callable[[RealtimeSessionState, PreparedRealtimeUserTurn], Awaitable[None]],
 ) -> None:
@@ -70,6 +83,9 @@ async def run_transcription_worker(
         sample_rate=session.asr_sample_rate,
         interim_results=interim_results,
     ):
+        if _should_skip_asr_result(asr_result):
+            continue
+
         if not asr_result.is_final:
             # Interim result – send streaming delta, do NOT trigger chat
             try:
@@ -77,21 +93,19 @@ async def run_transcription_worker(
                     session,
                     asr_result,
                     tracker,
-                    hide_metadata=hide_metadata,
                 )
             except Exception as exc:  # pragma: no cover
                 logger.error("Error sending interim transcribe delta: %s", exc)
             continue
 
         # Final result – complete the event sequence
-        prepared_turn = prepare_realtime_user_turn(asr_result.transcript)
+        prepared_turn = prepare_realtime_user_turn(asr_result)
 
         try:
             await send_transcribe_response(
                 session,
                 asr_result,
                 tracker,
-                hide_metadata=hide_metadata,
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("Error sending transcribe response: %s", exc)
