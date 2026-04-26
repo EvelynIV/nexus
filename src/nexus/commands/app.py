@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from pathlib import Path
 from nexus.application import container as app_container
 from nexus.api.v1 import router as v1_router
+from nexus.api.v1.realtime.runtime import get_realtime_api_runtime
 from omegaconf import OmegaConf, ListConfig
 from nexus.configs.config import NexusConfig
 
@@ -34,9 +35,14 @@ def create_fastapi_app(
         在此处初始化需要绑定到 uvicorn event loop 的异步资源（如 grpc.aio channel）。
         """
         app_container.configure(engine_config=engine_config)
+        runtime = await get_realtime_api_runtime(app_container.get_container())
+        await runtime.start()
         logger.info("Application container initialized")
-        yield
-        await app_container.shutdown()
+        try:
+            yield
+        finally:
+            await runtime.calls.close()
+            await app_container.shutdown()
         logger.info("Application container shutdown complete")
 
     fastapi_app = FastAPI(

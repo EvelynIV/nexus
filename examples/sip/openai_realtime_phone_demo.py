@@ -12,13 +12,13 @@ the OpenAI Realtime API and sends the model audio back to the call.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import base64
 import json
 import os
 import queue
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -27,19 +27,27 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 
+import g711
+import numpy as np
+import typer
 from openai import AsyncOpenAI
 import websockets.sync.client
+
+from nexus.infrastructure.audio.resampler import StreamingResampler
 
 
 RTP_HEADER_LEN = 12
 PCMU_PAYLOAD_TYPE = 0
 PCMA_PAYLOAD_TYPE = 8
 SAMPLE_RATE = 8000
+REALTIME_SAMPLE_RATE = 24000
 FRAME_MS = 20
 SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS // 1000
 G711_BYTES_PER_FRAME = SAMPLES_PER_FRAME
+PCM_WIDTH_BYTES = 2
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,42 @@ def queue_drop_oldest(target: queue.Queue[bytes], item: bytes) -> None:
     target.put_nowait(item)
 
 
+def pcm16_bytes_to_float32(pcm: bytes) -> np.ndarray:
+    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def float32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
+    return np.clip(samples * 32768.0, -32768, 32767).astype(np.int16).tobytes()
+
+
+class G711PcmTranscoder:
+    def __init__(self, codec: str) -> None:
+        self.codec = codec
+        self._to_realtime = StreamingResampler(SAMPLE_RATE, REALTIME_SAMPLE_RATE)
+        self._to_rtp = StreamingResampler(REALTIME_SAMPLE_RATE, SAMPLE_RATE)
+
+    def reset(self) -> None:
+        self._to_realtime.reset()
+        self._to_rtp.reset()
+
+    def rtp_payload_to_realtime_pcm(self, payload: bytes) -> bytes:
+        if self.codec == "alaw":
+            samples = g711.decode_alaw(payload)
+        else:
+            samples = g711.decode_ulaw(payload)
+        pcm8 = float32_to_pcm16_bytes(samples)
+        return self._to_realtime.process(pcm8)
+
+    def realtime_pcm_to_rtp_payload(self, pcm24: bytes) -> bytes:
+        pcm8 = self._to_rtp.process(pcm24)
+        if not pcm8:
+            return b""
+        samples = pcm16_bytes_to_float32(pcm8)
+        if self.codec == "alaw":
+            return g711.encode_alaw(samples)
+        return g711.encode_ulaw(samples)
+
+
 class RtpAudioEndpoint:
     def __init__(
         self,
@@ -116,7 +160,6 @@ class RtpAudioEndpoint:
         self.bind_port = bind_port
         self.codec = codec
         self.payload_type = PCMA_PAYLOAD_TYPE if codec == "alaw" else PCMU_PAYLOAD_TYPE
-        self.openai_audio_format = "audio/pcma" if codec == "alaw" else "audio/pcmu"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((bind_host, bind_port))
         self.remote_addr: tuple[str, int] | None = None
@@ -368,6 +411,7 @@ class OpenAiRealtimeBridge:
         self._current_audio_content_index = 0
         self._ignored_error_event_ids: set[str] = set()
         self._suppressed_response_ids: set[str] = set()
+        self._transcoder = G711PcmTranscoder(rtp.codec)
 
     def start(self) -> None:
         self.stop()
@@ -377,6 +421,7 @@ class OpenAiRealtimeBridge:
         self._current_audio_content_index = 0
         self._ignored_error_event_ids.clear()
         self._suppressed_response_ids.clear()
+        self._transcoder.reset()
         self._active.set()
         self._thread = threading.Thread(
             target=self._thread_main,
@@ -417,7 +462,10 @@ class OpenAiRealtimeBridge:
             base_url=self.config.base_url,
         )
         print(f"Connecting OpenAI Realtime model={self.config.model} voice={self.config.voice}")
-        async with client.realtime.connect(model=self.config.model) as connection:
+        async with client.realtime.connect(
+            model=self.config.model,
+            websocket_connection_options={"ssl": insecure_ssl_context()},
+        ) as connection:
             self._connection = connection
             await connection.send(self._build_session_update())
             if self.config.greeting:
@@ -443,6 +491,10 @@ class OpenAiRealtimeBridge:
                 task.result()
 
     def _build_session_update(self) -> dict[str, Any]:
+        realtime_audio_format = {
+            "type": self.config.audio_format,
+            "rate": REALTIME_SAMPLE_RATE,
+        }
         return {
             "type": "session.update",
             "session": {
@@ -452,9 +504,7 @@ class OpenAiRealtimeBridge:
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
-                        "format": {
-                            "type": self.config.audio_format,
-                        },
+                        "format": realtime_audio_format,
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": 0.5,
@@ -465,9 +515,7 @@ class OpenAiRealtimeBridge:
                         },
                     },
                     "output": {
-                        "format": {
-                            "type": self.config.audio_format,
-                        },
+                        "format": realtime_audio_format,
                         "voice": self.config.voice,
                     },
                 },
@@ -479,10 +527,13 @@ class OpenAiRealtimeBridge:
             payload = await asyncio.to_thread(self.rtp.read_input_payload, 0.2)
             if not payload:
                 continue
+            audio = await asyncio.to_thread(self._transcoder.rtp_payload_to_realtime_pcm, payload)
+            if not audio:
+                continue
             await connection.send(
                 {
                     "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(payload).decode("ascii"),
+                    "audio": base64.b64encode(audio).decode("ascii"),
                 }
             )
 
@@ -499,7 +550,11 @@ class OpenAiRealtimeBridge:
                 self._track_output_audio_delta(event)
                 delta = get_event_attr(event, "delta")
                 if isinstance(delta, str):
-                    self.rtp.enqueue_output_audio(base64.b64decode(delta))
+                    payload = await asyncio.to_thread(
+                        self._transcoder.realtime_pcm_to_rtp_payload,
+                        base64.b64decode(delta),
+                    )
+                    self.rtp.enqueue_output_audio(payload)
                 continue
 
             if event_type == "error":
@@ -525,12 +580,17 @@ class OpenAiRealtimeBridge:
                 self._current_response_id = None
                 self._current_audio_item_id = None
 
+            if event_type == "conversation.item.input_audio_transcription.completed":
+                transcript = get_event_attr(event, "transcript")
+                print(f"Realtime transcription: {transcript!r}")
+
             if event_type in {
                 "session.created",
                 "session.updated",
                 "input_audio_buffer.speech_started",
                 "input_audio_buffer.speech_stopped",
                 "input_audio_buffer.committed",
+                "conversation.item.input_audio_transcription.completed",
                 "response.created",
                 "response.output_audio.done",
                 "response.output_audio_transcript.done",
@@ -649,6 +709,15 @@ def format_event(event: Any) -> str:
         return f"{event_type} id={session.get('id', '<unknown>')}"
     if event_type == "session.updated":
         return event_type
+    if event_type == "conversation.item.input_audio_transcription.delta":
+        delta = payload.get("delta")
+        return f"{event_type} delta={delta!r}"
+    if event_type == "conversation.item.input_audio_transcription.completed":
+        transcript = payload.get("transcript")
+        return f"{event_type} transcript={transcript!r}"
+    if event_type == "response.output_audio_transcript.delta":
+        delta = payload.get("delta")
+        return f"{event_type} delta={delta!r}"
     if event_type == "response.output_audio_transcript.done":
         transcript = payload.get("transcript")
         return f"{event_type} transcript={transcript!r}"
@@ -659,33 +728,123 @@ def format_event(event: Any) -> str:
     return event_type
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Bridge Asterisk ARI ExternalMedia RTP to OpenAI Realtime."
-    )
-    parser.add_argument("--ari-url", default="http://127.0.0.1:8088/ari")
-    parser.add_argument("--ari-user", default="voicebot")
-    parser.add_argument("--ari-password", default="12345678")
-    parser.add_argument("--app", default="voicebot")
-    parser.add_argument("--rtp-host", default="127.0.0.1")
-    parser.add_argument("--rtp-port", type=int, default=4000)
-    parser.add_argument("--codec", choices=("ulaw", "alaw"), default="ulaw")
-    parser.add_argument("--model", default="gpt-realtime")
-    parser.add_argument("--voice", default="alloy")
-    parser.add_argument(
+def insecure_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def main(
+    ari_url: str = typer.Option(
+        "http://127.0.0.1:8088/ari",
+        "--ari-url",
+        envvar="SIP_ARI_URL",
+        help="Asterisk ARI base URL.",
+    ),
+    ari_user: str = typer.Option(
+        "voicebot",
+        "--ari-user",
+        envvar="SIP_ARI_USER",
+        help="Asterisk ARI username.",
+    ),
+    ari_password: str = typer.Option(
+        "12345678",
+        "--ari-password",
+        envvar="SIP_ARI_PASSWORD",
+        help="Asterisk ARI password.",
+    ),
+    stasis_app: str = typer.Option(
+        "voicebot",
+        "--app",
+        envvar="SIP_STASIS_APP",
+        help="Asterisk Stasis app name.",
+    ),
+    rtp_host: str = typer.Option(
+        "127.0.0.1",
+        "--rtp-host",
+        envvar="SIP_RTP_HOST",
+        help="Local RTP bind host passed to ARI ExternalMedia.",
+    ),
+    rtp_port: int = typer.Option(
+        4000,
+        "--rtp-port",
+        envvar="SIP_RTP_PORT",
+        help="Local RTP bind port passed to ARI ExternalMedia.",
+    ),
+    codec: Literal["ulaw", "alaw"] = typer.Option(
+        "ulaw",
+        "--codec",
+        envvar="SIP_CODEC",
+        help="Asterisk ExternalMedia codec.",
+    ),
+    model: str = typer.Option(
+        "deepseek-v4-flash",
+        "--model",
+        envvar=["SIP_REALTIME_MODEL", "OPENAI_REALTIME_MODEL", "OPENAI_MODEL"],
+        help="Realtime model name.",
+    ),
+    voice: str = typer.Option(
+        "paimon",
+        "--voice",
+        envvar=["SIP_REALTIME_VOICE", "OPENAI_REALTIME_VOICE", "OPENAI_VOICE"],
+        help="Realtime output voice.",
+    ),
+    instructions: str = typer.Option(
+        "You are a concise phone voice assistant. Keep replies brief and natural.",
         "--instructions",
-        default="You are a concise phone voice assistant. Keep replies brief and natural.",
-    )
-    parser.add_argument("--openai-base-url", default="https://api.openai.com/v1")
-    parser.add_argument("--greeting", default="")
-    parser.add_argument("--input-queue-size", type=int, default=128)
-    parser.add_argument("--output-queue-size", type=int, default=128)
-    parser.add_argument(
+        envvar="SIP_REALTIME_INSTRUCTIONS",
+        help="Realtime session instructions.",
+    ),
+    openai_base_url: str = typer.Option(
+        "https://api.openai.com/v1",
+        "--openai-base-url",
+        envvar=["SIP_OPENAI_BASE_URL", "OPENAI_BASE_URL"],
+        help="OpenAI-compatible API base URL.",
+    ),
+    greeting: str = typer.Option(
+        "",
+        "--greeting",
+        envvar="SIP_REALTIME_GREETING",
+        help="Optional initial assistant greeting instruction.",
+    ),
+    input_queue_size: int = typer.Option(
+        128,
+        "--input-queue-size",
+        envvar="SIP_INPUT_QUEUE_SIZE",
+        help="Maximum queued inbound RTP frames.",
+    ),
+    output_queue_size: int = typer.Option(
+        128,
+        "--output-queue-size",
+        envvar="SIP_OUTPUT_QUEUE_SIZE",
+        help="Maximum queued outbound RTP audio chunks.",
+    ),
+    hangup_existing_calls: bool = typer.Option(
+        False,
         "--hangup-existing-calls",
-        action="store_true",
+        envvar="SIP_HANGUP_EXISTING_CALLS",
         help="Hang up existing calls in this Stasis app before waiting for a new call.",
+    ),
+) -> None:
+    args = SimpleNamespace(
+        ari_url=ari_url,
+        ari_user=ari_user,
+        ari_password=ari_password,
+        app=stasis_app,
+        rtp_host=rtp_host,
+        rtp_port=rtp_port,
+        codec=codec,
+        model=model,
+        voice=voice,
+        instructions=instructions,
+        openai_base_url=openai_base_url,
+        greeting=greeting,
+        input_queue_size=input_queue_size,
+        output_queue_size=output_queue_size,
+        hangup_existing_calls=hangup_existing_calls,
     )
-    return parser.parse_args()
+    run_demo(args)
 
 
 def check_ari_ready(ari: AriClient) -> None:
@@ -741,8 +900,7 @@ def validate_positive(value: int, name: str) -> None:
         raise RuntimeError(f"{name} must be greater than 0.")
 
 
-def main() -> None:
-    args = parse_args()
+def run_demo(args: SimpleNamespace) -> None:
     try:
         api_key = require_openai_api_key()
         validate_positive(args.input_queue_size, "--input-queue-size")
@@ -750,6 +908,11 @@ def main() -> None:
     except Exception as exc:
         print(f"Startup failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    print(
+        "OpenAI Realtime config: "
+        f"base_url={args.openai_base_url} model={args.model} voice={args.voice}"
+    )
 
     config = AriConfig(
         base_url=args.ari_url,
@@ -797,7 +960,7 @@ def main() -> None:
             voice=args.voice,
             instructions=args.instructions,
             greeting=args.greeting,
-            audio_format=rtp.openai_audio_format,
+            audio_format="audio/pcm",
         ),
         rtp=rtp,
         error_queue=event_error,
@@ -871,4 +1034,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

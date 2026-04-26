@@ -858,6 +858,25 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 reference = "tuna"
 
 [[package]]
+name = "g711"
+version = "1.6.5"
+description = "A small library for A-Law and u-Law audio coding"
+optional = false
+python-versions = ">=3.6"
+groups = ["main"]
+files = [
+    {file = "g711-1.6.5.tar.gz", hash = "sha256:bcde5490806c7b86b4a9634eb3fa888e9bbc8a54878338bf52383c1bf9f69996"},
+]
+
+[package.dependencies]
+numpy = ">=1.20.1"
+
+[package.source]
+type = "legacy"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+reference = "tuna"
+
+[[package]]
 name = "google-crc32c"
 version = "1.8.0"
 description = "A python wrapper of the C library 'Google CRC32C'"
@@ -3372,4 +3391,4 @@ reference = "tuna"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "f55ebeac251671d95d920c074fa054de22562ca5bf3f5701a2e9f6304b7c898a"
+content-hash = "73c5b6e6a2b0a34b9da30fbcaa8b81b03a97afbd63d753be6f512ef6e16d0cd3"

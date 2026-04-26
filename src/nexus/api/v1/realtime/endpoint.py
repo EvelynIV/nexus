@@ -7,6 +7,7 @@ from fastapi import Depends, Query, WebSocket, WebSocketDisconnect
 from nexus.application.container import AppContainer, get_container
 from nexus.application.realtime.protocol import BroadcastRealtimeSink, RealtimeServerWriter
 
+from .asterisk import AsteriskCallError
 from .controller import RealtimeSessionController
 from .http import extract_bearer_token
 from .runtime import RealtimeCallError, get_realtime_api_runtime
@@ -42,7 +43,7 @@ async def realtime_endpoint_worker(
         writer = RealtimeServerWriter(websocket)
         try:
             await call.attach_sideband(writer)
-        except RealtimeCallError:
+        except (RealtimeCallError, AsteriskCallError):
             await websocket.close(code=1008)
             return
         try:

@@ -26,6 +26,7 @@ dependencies = [
     "omegaconf (>=2.3.0,<3.0.0)",
     "mcp (>=1.26.0,<2.0.0)",
     "samplerate (>=0.2.4,<0.3.0)",
+    "g711 (>=1.6.5,<2.0.0)",
 ]
 
 [tool.poetry]

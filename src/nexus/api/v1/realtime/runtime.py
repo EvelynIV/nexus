@@ -25,6 +25,7 @@ from nexus.application.realtime.protocol import (
 from nexus.domain.realtime import RealtimeSessionState
 from nexus.infrastructure.audio.resampler import StreamingResampler
 
+from .asterisk import AsteriskCallError, AsteriskCallRegistry
 from .controller import RealtimeSessionController
 
 
@@ -532,12 +533,17 @@ class RealtimeCallRegistry:
     def __init__(self, container: AppContainer) -> None:
         self.container = container
         self._webrtc = WebRtcCallRegistry(container)
+        self._asterisk = AsteriskCallRegistry(container)
+
+    async def start(self) -> None:
+        await self._asterisk.start()
 
     async def close(self) -> None:
         for call_id in list(self._webrtc._calls):
             call = await self._webrtc.get(call_id)
             if call is not None:
                 await call.close()
+        await self._asterisk.close()
 
     async def create_call(self, *, sdp_offer: str, session_config: dict[str, Any]) -> WebRtcCallSession:
         return await self._webrtc.create_call(sdp_offer=sdp_offer, session_config=session_config)
@@ -546,29 +552,41 @@ class RealtimeCallRegistry:
         call = await self._webrtc.get(call_id)
         if call is not None:
             return call
+        call = await self._asterisk.get(call_id)
+        if call is not None:
+            return call
         return None
 
     async def remove(self, call_id: str) -> None:
         await self._webrtc.remove(call_id)
 
     async def accept_call(self, call_id: str, *, session_config: dict[str, Any]) -> None:
-        del session_config
-        raise RealtimeCallError(404, f"Call {call_id} not found.")
+        try:
+            await self._asterisk.accept_call(call_id, session_config=session_config)
+        except AsteriskCallError as exc:
+            raise RealtimeCallError(exc.status_code, exc.detail) from exc
 
     async def reject_call(self, call_id: str, *, status_code: int = 603) -> None:
-        del status_code
-        raise RealtimeCallError(404, f"Call {call_id} not found.")
+        try:
+            await self._asterisk.reject_call(call_id, status_code=status_code)
+        except AsteriskCallError as exc:
+            raise RealtimeCallError(exc.status_code, exc.detail) from exc
 
     async def refer_call(self, call_id: str, *, target_uri: str) -> None:
-        del target_uri
-        raise RealtimeCallError(404, f"Call {call_id} not found.")
+        try:
+            await self._asterisk.refer_call(call_id, target_uri=target_uri)
+        except AsteriskCallError as exc:
+            raise RealtimeCallError(exc.status_code, exc.detail) from exc
 
     async def hangup_call(self, call_id: str) -> None:
         webrtc_call = await self._webrtc.get(call_id)
         if webrtc_call is not None:
             await webrtc_call.close()
             return
-        raise RealtimeCallError(404, f"Call {call_id} not found.")
+        try:
+            await self._asterisk.hangup_call(call_id)
+        except AsteriskCallError as exc:
+            raise RealtimeCallError(exc.status_code, exc.detail) from exc
 
 
 class RealtimeApiRuntime:
@@ -578,6 +596,9 @@ class RealtimeApiRuntime:
             default_ttl_seconds=container.config.realtime_client_secret_ttl_seconds,
         )
         self.calls = RealtimeCallRegistry(container)
+
+    async def start(self) -> None:
+        await self.calls.start()
 
     def api_key_required(self) -> bool:
         return bool(self.container.config.realtime_api_key)

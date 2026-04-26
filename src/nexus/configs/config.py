@@ -19,6 +19,19 @@ class NexusConfig:
     tts_grpc_text_chunk_size: int = 1
     asr_interim_results: bool = True
 
+    asterisk_ingress_enabled: bool = False
+    asterisk_ari_url: str = "http://127.0.0.1:8088/ari"
+    asterisk_ari_user: str = "voicebot"
+    asterisk_ari_password: str = "12345678"
+    asterisk_stasis_app: str = "nexus"
+    asterisk_external_host: str = "127.0.0.1"
+    asterisk_rtp_port_start: int = 4000
+    asterisk_rtp_port_end: int = 4099
+    asterisk_codec: str = "ulaw"
+    asterisk_refer_endpoint_prefix: str | None = None
+    realtime_webhook_url: str | None = None
+    realtime_webhook_secret: str | None = None
+
     def __post_init__(self) -> None:
         if not self.tts_grpc_addr:
             raise ValueError("tts_grpc_addr is required")
@@ -52,3 +65,9 @@ class NexusConfig:
             raise ValueError("realtime_client_secret_ttl_seconds must be greater than 0")
         if self.realtime_session_max_seconds <= 0:
             raise ValueError("realtime_session_max_seconds must be greater than 0")
+        if self.asterisk_codec not in {"ulaw", "alaw"}:
+            raise ValueError("asterisk_codec must be 'ulaw' or 'alaw'")
+        if self.asterisk_rtp_port_start <= 0 or self.asterisk_rtp_port_end <= 0:
+            raise ValueError("Asterisk RTP port range must be positive")
+        if self.asterisk_rtp_port_start > self.asterisk_rtp_port_end:
+            raise ValueError("asterisk_rtp_port_start must be <= asterisk_rtp_port_end")
