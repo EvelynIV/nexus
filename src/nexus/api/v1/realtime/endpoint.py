@@ -9,7 +9,7 @@ from nexus.application.realtime.protocol import BroadcastRealtimeSink, RealtimeS
 
 from .controller import RealtimeSessionController
 from .http import extract_bearer_token
-from .runtime import get_realtime_api_runtime
+from .runtime import RealtimeCallError, get_realtime_api_runtime
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,11 @@ async def realtime_endpoint_worker(
 
         await websocket.accept()
         writer = RealtimeServerWriter(websocket)
-        await call.attach_sideband(writer)
+        try:
+            await call.attach_sideband(writer)
+        except RealtimeCallError:
+            await websocket.close(code=1008)
+            return
         try:
             while True:
                 raw_text = await websocket.receive_text()

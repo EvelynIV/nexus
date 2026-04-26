@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass
 class NexusConfig:
     asr_grpc_addr: str

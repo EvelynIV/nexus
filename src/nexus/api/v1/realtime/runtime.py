@@ -35,6 +35,13 @@ DEFAULT_OUTPUT_MODALITIES = ["audio", "text"]
 DEFAULT_VOICE = "alloy"
 
 
+class RealtimeCallError(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 def deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in patch.items():
@@ -45,22 +52,28 @@ def deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, An
     return merged
 
 
-def normalize_output_modalities(value: Any) -> list[str]:
-    raw = list(value or DEFAULT_OUTPUT_MODALITIES)
+def normalize_output_modalities(value: Any, *, default_modalities: list[str] | None = None) -> list[str]:
+    defaults = default_modalities or DEFAULT_OUTPUT_MODALITIES
+    raw = list(value or defaults)
     normalized = {str(item).strip().lower() for item in raw if item}
     ordered: list[str] = []
     if "audio" in normalized:
         ordered.append("audio")
     if "text" in normalized:
         ordered.append("text")
-    return ordered or DEFAULT_OUTPUT_MODALITIES.copy()
+    return ordered or defaults.copy()
 
 
-def build_default_session_config(model: str = DEFAULT_REALTIME_MODEL) -> dict[str, Any]:
+def build_default_session_config(
+    model: str = DEFAULT_REALTIME_MODEL,
+    *,
+    output_modalities: list[str] | None = None,
+) -> dict[str, Any]:
+    default_output_modalities = output_modalities or DEFAULT_OUTPUT_MODALITIES
     return {
         "type": "realtime",
         "model": model,
-        "output_modalities": DEFAULT_OUTPUT_MODALITIES.copy(),
+        "output_modalities": default_output_modalities.copy(),
         "tools": [],
         "tool_choice": "auto",
         "audio": {
@@ -89,16 +102,27 @@ def normalize_session_config(
     raw_session: dict[str, Any] | None,
     *,
     default_model: str = DEFAULT_REALTIME_MODEL,
+    default_output_modalities: list[str] | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    session = deep_merge_dict(build_default_session_config(default_model), raw_session or {})
+    default_modalities = default_output_modalities or DEFAULT_OUTPUT_MODALITIES
+    session = deep_merge_dict(
+        build_default_session_config(
+            default_model,
+            output_modalities=default_modalities,
+        ),
+        raw_session or {},
+    )
     if session.get("type", "realtime") != "realtime":
         raise ValueError("Only realtime session type is currently supported.")
     session["type"] = "realtime"
     session["model"] = session.get("model") or default_model
     session["id"] = session_id or session.get("id") or f"sess_{uuid.uuid4().hex}"
     session["object"] = "realtime.session"
-    session["output_modalities"] = normalize_output_modalities(session.get("output_modalities"))
+    session["output_modalities"] = normalize_output_modalities(
+        session.get("output_modalities"),
+        default_modalities=default_modalities,
+    )
 
     audio = session.setdefault("audio", {})
     input_cfg = audio.setdefault("input", {})
@@ -504,13 +528,56 @@ class WebRtcCallRegistry:
             self._calls.pop(call_id, None)
 
 
+class RealtimeCallRegistry:
+    def __init__(self, container: AppContainer) -> None:
+        self.container = container
+        self._webrtc = WebRtcCallRegistry(container)
+
+    async def close(self) -> None:
+        for call_id in list(self._webrtc._calls):
+            call = await self._webrtc.get(call_id)
+            if call is not None:
+                await call.close()
+
+    async def create_call(self, *, sdp_offer: str, session_config: dict[str, Any]) -> WebRtcCallSession:
+        return await self._webrtc.create_call(sdp_offer=sdp_offer, session_config=session_config)
+
+    async def get(self, call_id: str):
+        call = await self._webrtc.get(call_id)
+        if call is not None:
+            return call
+        return None
+
+    async def remove(self, call_id: str) -> None:
+        await self._webrtc.remove(call_id)
+
+    async def accept_call(self, call_id: str, *, session_config: dict[str, Any]) -> None:
+        del session_config
+        raise RealtimeCallError(404, f"Call {call_id} not found.")
+
+    async def reject_call(self, call_id: str, *, status_code: int = 603) -> None:
+        del status_code
+        raise RealtimeCallError(404, f"Call {call_id} not found.")
+
+    async def refer_call(self, call_id: str, *, target_uri: str) -> None:
+        del target_uri
+        raise RealtimeCallError(404, f"Call {call_id} not found.")
+
+    async def hangup_call(self, call_id: str) -> None:
+        webrtc_call = await self._webrtc.get(call_id)
+        if webrtc_call is not None:
+            await webrtc_call.close()
+            return
+        raise RealtimeCallError(404, f"Call {call_id} not found.")
+
+
 class RealtimeApiRuntime:
     def __init__(self, container: AppContainer) -> None:
         self.container = container
         self.client_secrets = ClientSecretStore(
             default_ttl_seconds=container.config.realtime_client_secret_ttl_seconds,
         )
-        self.calls = WebRtcCallRegistry(container)
+        self.calls = RealtimeCallRegistry(container)
 
     def api_key_required(self) -> bool:
         return bool(self.container.config.realtime_api_key)
