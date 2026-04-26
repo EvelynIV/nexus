@@ -9,6 +9,22 @@ from nexus.domain.realtime import RealtimeSessionState
 logger = logging.getLogger(__name__)
 
 
+def _last_assistant_reasoning_content(session: RealtimeSessionState) -> str:
+    for message in reversed(session.chat_session.chat_history):
+        if isinstance(message, dict):
+            if message.get("role") == "assistant":
+                return message.get("reasoning_content") or ""
+            continue
+        if getattr(message, "role", None) == "assistant":
+            return getattr(message, "reasoning_content", None) or ""
+    return ""
+
+
+def _assistant_reasoning_kwargs(session: RealtimeSessionState) -> dict[str, str]:
+    reasoning_content = _last_assistant_reasoning_content(session)
+    return {"reasoning_content": reasoning_content} if reasoning_content else {}
+
+
 async def execute_mcp_tool_call(
     *,
     session: RealtimeSessionState,
@@ -35,6 +51,7 @@ async def execute_mcp_tool_call(
         assistant_msg = {
             "role": "assistant",
             "content": None,
+            **_assistant_reasoning_kwargs(session),
             "tool_calls": [
                 {
                     "id": mcp_ctx.item_id,
@@ -61,6 +78,7 @@ async def execute_mcp_tool_call(
         assistant_msg = {
             "role": "assistant",
             "content": None,
+            **_assistant_reasoning_kwargs(session),
             "tool_calls": [
                 {
                     "id": mcp_ctx.item_id,

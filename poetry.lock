@@ -2714,6 +2714,47 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 reference = "tuna"
 
 [[package]]
+name = "samplerate"
+version = "0.2.4"
+description = "Monolithic python wrapper for libsamplerate based on pybind11 and NumPy"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "samplerate-0.2.4-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:558ad3b4416559a9b3a0e30a5315fd750d8d814162415531e961098a37976ddc"},
+    {file = "samplerate-0.2.4-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5a4c2bd7f4fa3a1d638857adf8fb6f364383b18c5f5d877dc1b9eb1b6e45405d"},
+    {file = "samplerate-0.2.4-cp310-cp310-win_amd64.whl", hash = "sha256:26cea1b3ba494a9632ec46a43c31bcca2e24b341f41ea42f333a1183f25773a5"},
+    {file = "samplerate-0.2.4-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:e692d453ae6952a9fe7c66b451027370333553d31ca4690375f34f725ba6a6cd"},
+    {file = "samplerate-0.2.4-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:af5ec978ed22567042ad188db622409d3c059245fe32a19202b9281b1352b962"},
+    {file = "samplerate-0.2.4-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3a0bbbf088894208386b0dc30ebacd51bab7406931cd9c6c31c1cf99baf026ee"},
+    {file = "samplerate-0.2.4-cp311-cp311-win_amd64.whl", hash = "sha256:d10c3088f63a55923cfda33dfc55498df0f92bf2afeeeca4a90751589e3b6af0"},
+    {file = "samplerate-0.2.4-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:b6a2c5cda090f3d5007a443c0f22635efe87b2fc0d2ea18dbdbd933cc2e560d2"},
+    {file = "samplerate-0.2.4-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ae92e3bcea4f74b2a66dc68b2cccef939250fca749982a45a614d10fe9f71440"},
+    {file = "samplerate-0.2.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:089a19db605be2385558294480169afdcb1e89dcf1fdb72bd5a2e0849dd783b5"},
+    {file = "samplerate-0.2.4-cp312-cp312-win_amd64.whl", hash = "sha256:2625a21eeffb81c896887659d6dffc01eedfdd60caaf653126a42871eee77aa6"},
+    {file = "samplerate-0.2.4-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:c5db609a3e54484882a18536ef7e7d6216f3f29944bdda440771c066607e1beb"},
+    {file = "samplerate-0.2.4-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:610a33a2d7e2a68b94dffc5918cb8354de1b2f2ab1f03394190b58aa8a5da320"},
+    {file = "samplerate-0.2.4-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4a6b9fc423687dd84323cea7a2629bf18b9b102f2df430b5654631f134fe8fcf"},
+    {file = "samplerate-0.2.4-cp313-cp313-win_amd64.whl", hash = "sha256:be2159e7119647214f93da735d3f09753dd9f7969ff8be061c23f8eb218b1a2a"},
+    {file = "samplerate-0.2.4-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:4555da77c9b85c94688a31cde24a974ca467d45896f4b31dd16c185545d49198"},
+    {file = "samplerate-0.2.4-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ad01c5f49181dd50ac2e36e7590619e743985a1a783540c7f4eb138482091da0"},
+    {file = "samplerate-0.2.4-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:98f13c280f9e220eeb7512896eedeab45bf8fcb7914a9507f79b3f88add72bef"},
+    {file = "samplerate-0.2.4-cp314-cp314-win_amd64.whl", hash = "sha256:f8093c12d698ae821501efeb0796f189cb354d48ea8f6299ad9d79468df22eec"},
+    {file = "samplerate-0.2.4-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:316736283db9c24a7058caaa56d9782d8446361ceb343930a0be5eebbd8d09fd"},
+    {file = "samplerate-0.2.4-cp39-cp39-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:41249f544776a4b133443e811df3e1e364d3f66706fc6b45ea9a450ea2d6259f"},
+    {file = "samplerate-0.2.4-cp39-cp39-win_amd64.whl", hash = "sha256:68316335e3710de4991d31a715268c6c7bdc95a931858b8e4dc6e721859a2473"},
+    {file = "samplerate-0.2.4.tar.gz", hash = "sha256:c44dcb6fe680246f8f36588ba1f0fc7a0c5fbce710ad5e9b3812d88e8c39ac7d"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.source]
+type = "legacy"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+reference = "tuna"
+
+[[package]]
 name = "scikit-learn"
 version = "1.7.2"
 description = "A set of python modules for machine learning and data mining"
@@ -3331,4 +3372,4 @@ reference = "tuna"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "08f16ddc3bb58cb0850f85a10b864f4513682808dd37bb9a68bff97ebbe862de"
+content-hash = "f55ebeac251671d95d920c074fa054de22562ca5bf3f5701a2e9f6304b7c898a"

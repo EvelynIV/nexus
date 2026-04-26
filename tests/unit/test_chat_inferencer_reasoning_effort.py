@@ -9,7 +9,7 @@ from nexus.infrastructure.chat.inferencer import AsyncInferencer, Inferencer
 
 
 @patch("nexus.infrastructure.chat.inferencer.OpenAI")
-def test_sync_inferencer_adds_reasoning_effort_for_qwen35(mock_openai) -> None:
+def test_sync_inferencer_does_not_special_case_qwen35(mock_openai) -> None:
     create_mock = Mock(return_value=object())
     mock_openai.return_value = SimpleNamespace(
         chat=SimpleNamespace(
@@ -24,11 +24,11 @@ def test_sync_inferencer_adds_reasoning_effort_for_qwen35(mock_openai) -> None:
         stream=True,
     )
 
-    assert create_mock.call_args.kwargs["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in create_mock.call_args.kwargs
 
 
 @patch("nexus.infrastructure.chat.inferencer.OpenAI")
-def test_sync_inferencer_matches_qwen35_case_insensitively(mock_openai) -> None:
+def test_sync_inferencer_does_not_special_case_qwen35_case_insensitively(mock_openai) -> None:
     create_mock = Mock(return_value=object())
     mock_openai.return_value = SimpleNamespace(
         chat=SimpleNamespace(
@@ -42,7 +42,7 @@ def test_sync_inferencer_matches_qwen35_case_insensitively(mock_openai) -> None:
         model="QWEN3.5:9b",
     )
 
-    assert create_mock.call_args.kwargs["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in create_mock.call_args.kwargs
 
 
 @patch("nexus.infrastructure.chat.inferencer.OpenAI")
@@ -65,7 +65,7 @@ def test_sync_inferencer_skips_reasoning_effort_for_other_models(mock_openai) ->
 
 @patch("nexus.infrastructure.chat.inferencer.AsyncOpenAI")
 @pytest.mark.asyncio
-async def test_async_inferencer_adds_reasoning_effort_for_qwen35(mock_async_openai) -> None:
+async def test_async_inferencer_does_not_special_case_qwen35(mock_async_openai) -> None:
     create_mock = AsyncMock(return_value=object())
     mock_async_openai.return_value = SimpleNamespace(
         chat=SimpleNamespace(
@@ -80,7 +80,7 @@ async def test_async_inferencer_adds_reasoning_effort_for_qwen35(mock_async_open
         stream=True,
     )
 
-    assert create_mock.call_args.kwargs["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in create_mock.call_args.kwargs
 
 
 @patch("nexus.infrastructure.chat.inferencer.AsyncOpenAI")

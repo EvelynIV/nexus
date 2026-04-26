@@ -283,6 +283,7 @@ class ChatStreamResult:
     """聊天流式响应结果"""
     content: str = ""
     raw_content: str = ""
+    reasoning_content: str = ""
     tts_text: str = ""
     tool_call: Optional[ToolCallInfo] = None
     was_cancelled: bool = False  # 是否被打断
@@ -376,6 +377,7 @@ async def process_chat_stream(
                 break
             
             delta = chunk.choices[0].delta
+            result.reasoning_content += getattr(delta, "reasoning_content", None) or ""
             
             # 处理工具调用
             if delta.tool_calls:
@@ -535,12 +537,12 @@ async def process_chat_stream(
         # 正常结束时，chat_session.get_result_record_itr 会自动处理
         # 但被取消时流不会正常结束，需要手动添加
         if result.was_cancelled and result.content:
-            from openai.types.chat import ChatCompletionMessage
-            cancelled_message = ChatCompletionMessage(
-                role="assistant",
-                content=result.content,  # 保存已生成的部分内容
-                tool_calls=[],
-            )
+            cancelled_message = {
+                "role": "assistant",
+                "content": result.content,  # 保存已生成的部分内容
+            }
+            if result.reasoning_content:
+                cancelled_message["reasoning_content"] = result.reasoning_content
             session.chat_session.chat_history.append(cancelled_message)
             logger.info(
                 f"Cancelled chat partial content saved to history: '{result.content}'"

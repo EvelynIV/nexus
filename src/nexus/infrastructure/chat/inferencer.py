@@ -1,5 +1,5 @@
 import logging
-from typing import Any, AsyncIterator, Iterator, List, Optional, Union
+from typing import AsyncIterator, Iterator, List, Optional, Union
 
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import (
@@ -14,13 +14,6 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage
 
 logger = logging.getLogger(__name__)
-
-
-def _chat_completion_compat_kwargs(model: str) -> dict[str, Any]:
-    """Return compatibility overrides for specific OpenAI-compatible backends."""
-    if "qwen3.5" in model.lower():
-        return {"reasoning_effort": "none"}
-    return {}
 
 
 class Inferencer:
@@ -63,7 +56,6 @@ class Inferencer:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=stream,
-                **_chat_completion_compat_kwargs(model),
             )
             return response
         except Exception as err:
@@ -95,7 +87,6 @@ class Inferencer:
                 stream=True,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                **_chat_completion_compat_kwargs(model),
                 **kwargs
             )
 
@@ -170,7 +161,6 @@ class AsyncInferencer:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=stream,
-                **_chat_completion_compat_kwargs(model),
             )
             return response
         except Exception as err:
@@ -201,7 +191,6 @@ class AsyncInferencer:
                 stream=True,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                **_chat_completion_compat_kwargs(model),
                 **kwargs
             )
 

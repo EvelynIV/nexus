@@ -114,9 +114,12 @@ def serve(
         f"ssl_certfile: {ssl_certfile}, ssl_keyfile: {ssl_keyfile}, ssl_ca_certs: {ssl_ca_certs}"
     )
 
-    engine_config: ListConfig = OmegaConf.load(engine_config)
-    engine_config = OmegaConf.to_container(engine_config, resolve=True)
-    engine_config = NexusConfig(**engine_config)
+    raw_engine_config: ListConfig = OmegaConf.load(engine_config)
+    structured_engine_config = OmegaConf.merge(
+        OmegaConf.structured(NexusConfig),
+        raw_engine_config,
+    )
+    engine_config = OmegaConf.to_object(structured_engine_config)
 
     fastapi_app = create_fastapi_app(
         engine_config=engine_config,

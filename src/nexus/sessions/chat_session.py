@@ -1,17 +1,14 @@
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterable, Generator, Iterable
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from openai.types.chat import (
     ChatCompletionAudioParam,
     ChatCompletionChunk,
-    ChatCompletionMessage,
-    ChatCompletionMessageFunctionToolCall,
     ChatCompletionMessageParam,
     ChatCompletionToolUnionParam,
 )
-from openai.types.chat.chat_completion_message_function_tool_call import Function
 
 from nexus.infrastructure.chat.inferencer import (
     AsyncInferencer as AsyncChatInferencer,
@@ -37,16 +34,65 @@ def _replace_assistant_message_content_in_history(
         if isinstance(message, dict):
             if message.get("role") == "assistant":
                 message["content"] = content
+                if message.get("tool_calls") == []:
+                    message.pop("tool_calls")
                 return
             continue
         if getattr(message, "role", None) != "assistant":
             continue
-        chat_history[index] = ChatCompletionMessage(
-            role="assistant",
+        chat_history[index] = _assistant_message_param(
             content=content,
-            tool_calls=getattr(message, "tool_calls", []) or [],
+            tool_calls=getattr(message, "tool_calls", None) or None,
+            reasoning_content=_get_message_reasoning_content(message),
         )
         return
+
+
+def _get_delta_reasoning_content(delta: Any) -> str:
+    return getattr(delta, "reasoning_content", None) or ""
+
+
+def _get_message_reasoning_content(message: Any) -> str:
+    if isinstance(message, dict):
+        return message.get("reasoning_content") or ""
+    return getattr(message, "reasoning_content", None) or ""
+
+
+def _assistant_reasoning_kwargs(reasoning_content: str) -> dict[str, str]:
+    return {"reasoning_content": reasoning_content} if reasoning_content else {}
+
+
+def _assistant_message_param(
+    *,
+    content: str,
+    tool_calls: list[Any] | None = None,
+    reasoning_content: str = "",
+) -> ChatCompletionMessageParam:
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": content,
+    }
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
+
+
+def _function_tool_call_param(
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+    arguments: str,
+) -> dict[str, Any]:
+    return {
+        "id": tool_call_id,
+        "type": "function",
+        "function": {
+            "arguments": arguments,
+            "name": tool_name,
+        },
+    }
 
 
 @dataclass
@@ -134,14 +180,17 @@ class ChatSession:
     ) -> Generator[ChatCompletionChunk, None, None]:
         """从流响应中提取结果记录，从而将user和tool消息添加到聊天历史中"""
         result = ""
+        reasoning_content = ""
         tool_name = None
         content = ""
         tool_call_id = None
         for chunk in stream_resp:
             yield chunk
-            if chunk.choices[0].delta.content:
-                result += chunk.choices[0].delta.content
-            stream_tool_calls = chunk.choices[0].delta.tool_calls
+            delta = chunk.choices[0].delta
+            if delta.content:
+                result += delta.content
+            reasoning_content += _get_delta_reasoning_content(delta)
+            stream_tool_calls = delta.tool_calls
             if stream_tool_calls:
                 if stream_tool_calls[0].function.name:
                     tool_name = stream_tool_calls[0].function.name
@@ -152,22 +201,19 @@ class ChatSession:
             if chunk.choices[0].finish_reason:
                 tool_calls = (
                     [
-                        ChatCompletionMessageFunctionToolCall(
-                            id=tool_call_id,
-                            type="function",
-                            function=Function(
-                                arguments=content,
-                                name=tool_name if tool_name else "",
-                            ),
+                        _function_tool_call_param(
+                            tool_call_id=tool_call_id,
+                            arguments=content,
+                            tool_name=tool_name,
                         )
                     ]
                     if tool_name
-                    else []
+                    else None
                 )
-                message = ChatCompletionMessage(
-                    role="assistant",
+                message = _assistant_message_param(
                     content=result,
                     tool_calls=tool_calls,
+                    reasoning_content=reasoning_content,
                 )
                 self.chat_history.append(message)
 
@@ -261,14 +307,17 @@ class AsyncChatSession:
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         """从流响应中提取结果记录，从而将user和tool消息添加到聊天历史中（异步版本）"""
         result = ""
+        reasoning_content = ""
         tool_name = None
         content = ""
         tool_call_id = None
         async for chunk in stream_resp:
             yield chunk
-            if chunk.choices[0].delta.content:
-                result += chunk.choices[0].delta.content
-            stream_tool_calls = chunk.choices[0].delta.tool_calls
+            delta = chunk.choices[0].delta
+            if delta.content:
+                result += delta.content
+            reasoning_content += _get_delta_reasoning_content(delta)
+            stream_tool_calls = delta.tool_calls
             if stream_tool_calls:
                 if stream_tool_calls[0].function.name:
                     tool_name = stream_tool_calls[0].function.name
@@ -279,22 +328,19 @@ class AsyncChatSession:
             if chunk.choices[0].finish_reason:
                 tool_calls = (
                     [
-                        ChatCompletionMessageFunctionToolCall(
-                            id=tool_call_id,
-                            type="function",
-                            function=Function(
-                                arguments=content,
-                                name=tool_name if tool_name else "",
-                            ),
+                        _function_tool_call_param(
+                            tool_call_id=tool_call_id,
+                            arguments=content,
+                            tool_name=tool_name,
                         )
                     ]
                     if tool_name
-                    else []
+                    else None
                 )
-                message = ChatCompletionMessage(
-                    role="assistant",
+                message = _assistant_message_param(
                     content=result,
                     tool_calls=tool_calls,
+                    reasoning_content=reasoning_content,
                 )
                 self.chat_history.append(message)
 
