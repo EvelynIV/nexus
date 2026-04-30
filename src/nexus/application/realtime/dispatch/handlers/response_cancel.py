@@ -7,4 +7,4 @@ from ..context import RealtimeDispatchContext
 
 async def handle_response_cancel(event: RealtimeClientEvent, ctx: RealtimeDispatchContext) -> None:
     assert isinstance(event, ResponseCancelEvent)
-    await ctx.service.handle_response_cancel(ctx.session, event)
+    await ctx.service.handle_response_cancel(ctx.session, event, reply_sink=ctx.reply_sink)

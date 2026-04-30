@@ -1,23 +1,24 @@
-from typing import Iterable, Optional
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Any, AsyncIterable, Optional, TYPE_CHECKING
 
 from openai.types import realtime
-from openai.types.chat import ChatCompletionChunk
 
 from nexus.infrastructure.asr import TranscriptionResult
-from nexus.application.realtime.protocol.ids import event_id, item_id
+from nexus.application.realtime.protocol.ids import conversation_id, event_id, item_id
 from nexus.application.realtime.text_processing import (
     SanitizedModelOutputAccumulator,
-    prepare_realtime_user_turn,
 )
 from nexus.application.realtime.emitters.response_contexts import (
     AudioResponseContext,
     FunctionCallResponseContext,
-    McpCallResponseContext,
     TextResponseContext,
+)
+from nexus.application.realtime.emitters.event_factory import (
+    build_response_created_event,
+    build_response_done_event,
+    build_function_call_arguments_done,
 )
 
 if TYPE_CHECKING:
@@ -108,8 +109,6 @@ async def send_transcribe_interim(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: TranscriptionStreamTracker,
-    *,
-    hide_metadata: bool = True,
 ) -> None:
     """Send streaming delta events for an interim (non-final) ASR result."""
 
@@ -129,12 +128,7 @@ async def send_transcribe_interim(
         tracker.mark_speech_started()
 
     # 计算增量 delta
-    event_transcript = (
-        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
-        if hide_metadata
-        else transcription_result.transcript
-    )
-    delta = tracker.compute_delta(event_transcript)
+    delta = tracker.compute_delta(transcription_result.transcript)
     if not delta:
         return
 
@@ -157,8 +151,6 @@ async def send_transcribe_response(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: Optional[TranscriptionStreamTracker] = None,
-    *,
-    hide_metadata: bool = True,
 ):
     """Complete the transcription event sequence for a final ASR result.
 
@@ -177,11 +169,7 @@ async def send_transcribe_response(
         )
         return
 
-    transcript = (
-        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
-        if hide_metadata
-        else transcription_result.transcript
-    )
+    transcript = transcription_result.transcript
 
     # Determine item_id – reuse from tracker if available
     if tracker is not None:
@@ -214,10 +202,12 @@ async def send_transcribe_response(
     await session.send_event(vad_stop_event)
 
     # committed
+    previous_item_id = session.register_server_conversation_item(response_item_id)
     committed_event = realtime.InputAudioBufferCommittedEvent(
         event_id=event_id(),
         item_id=response_item_id,
         type="input_audio_buffer.committed",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(committed_event)
 
@@ -258,11 +248,17 @@ async def send_transcribe_response(
         status="completed",
     )
     conversation_add_event = realtime.ConversationItemAdded(
-        event_id=event_id(), item=item, type="conversation.item.added"
+        event_id=event_id(),
+        item=item,
+        type="conversation.item.added",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(conversation_add_event)
     conversation_done_event = realtime.ConversationItemDone(
-        event_id=event_id(), item=item, type="conversation.item.done"
+        event_id=event_id(),
+        item=item,
+        type="conversation.item.done",
+        previous_item_id=previous_item_id,
     )
     await session.send_event(conversation_done_event)
 
@@ -279,27 +275,22 @@ class ToolCallInfo:
     call_id: str
     name: str
     arguments: str
-    is_mcp: bool = False  # 是否为 MCP 工具调用
-    server_label: Optional[str] = None  # MCP 服务器标签
-    mcp_ctx: Optional["McpCallResponseContext"] = None  # MCP 上下文（用于后续事件发送）
 
 
-@dataclass 
-class ChatStreamResult:
-    """聊天流式响应结果"""
+@dataclass
+class ResponseStreamResult:
+    """Responses 流式响应结果"""
     content: str = ""
     raw_content: str = ""
     tts_text: str = ""
     tool_call: Optional[ToolCallInfo] = None
     was_cancelled: bool = False  # 是否被打断
+    response_id: str | None = None
+    failed: bool = False
     
     @property
     def has_tool_call(self) -> bool:
         return self.tool_call is not None
-    
-    @property
-    def has_mcp_call(self) -> bool:
-        return self.tool_call is not None and self.tool_call.is_mcp
 
 
 def _modalities_or_default(modalities: Optional[list[str]]) -> list[str]:
@@ -310,127 +301,193 @@ def _is_audio_mode(modalities: list[str]) -> bool:
     return "audio" in modalities
 
 
-async def process_chat_stream(
+def _is_text_mode(modalities: list[str]) -> bool:
+    return "text" in modalities
+
+
+def _event_payload(event: Any) -> dict[str, Any]:
+    if isinstance(event, dict):
+        return event
+    if hasattr(event, "model_dump"):
+        return event.model_dump(exclude_none=True)
+    return {}
+
+
+def _response_id_from_event(payload: dict[str, Any], fallback: str | None = None) -> str | None:
+    response = payload.get("response")
+    if isinstance(response, dict):
+        return response.get("id") or fallback
+    return fallback
+
+
+def _realtime_message_item(item: dict[str, Any], status: str = "in_progress") -> dict[str, Any]:
+    return {
+        "id": item.get("id") or item_id(),
+        "object": "realtime.item",
+        "type": "message",
+        "role": "assistant",
+        "status": status,
+        "content": [],
+    }
+
+
+def _realtime_function_item(item: dict[str, Any], status: str = "in_progress") -> dict[str, Any]:
+    return {
+        "id": item.get("id") or item_id(),
+        "object": "realtime.item",
+        "type": "function_call",
+        "call_id": item.get("call_id"),
+        "name": item.get("name") or "",
+        "arguments": item.get("arguments") or "",
+        "status": status,
+    }
+
+
+def _realtime_passthrough_item(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    payload.setdefault("id", item_id())
+    return payload
+
+
+async def _send_item_added(
     session: "RealtimeSessionState",
-    chat_stream: Iterable[ChatCompletionChunk],
+    *,
+    response_id_value: str,
+    item: dict[str, Any],
+) -> str | None:
+    previous_item_id = session.register_server_conversation_item(item["id"])
+    await session.send_event(
+        {
+            "type": "response.output_item.added",
+            "event_id": event_id(),
+            "response_id": response_id_value,
+            "output_index": 0,
+            "item": item,
+        }
+    )
+    await session.send_event(
+        {
+            "type": "conversation.item.added",
+            "event_id": event_id(),
+            "previous_item_id": previous_item_id,
+            "item": item,
+        }
+    )
+    return previous_item_id
+
+
+async def _send_item_done(
+    session: "RealtimeSessionState",
+    *,
+    response_id_value: str,
+    item: dict[str, Any],
+    previous_item_id: str | None,
+) -> None:
+    await session.send_event(
+        {
+            "type": "response.output_item.done",
+            "event_id": event_id(),
+            "response_id": response_id_value,
+            "output_index": 0,
+            "item": item,
+        }
+    )
+    await session.send_event(
+        {
+            "type": "conversation.item.done",
+            "event_id": event_id(),
+            "previous_item_id": previous_item_id,
+            "item": item,
+        }
+    )
+
+
+async def _send_mcp_status(
+    session: "RealtimeSessionState",
+    *,
+    source_type: str,
+    item_id_value: str | None,
+) -> None:
+    status_type = source_type.replace("response.", "", 1)
+    await session.send_event(
+        {
+            "type": status_type,
+            "event_id": event_id(),
+            "item_id": item_id_value or item_id(),
+        }
+    )
+
+
+async def process_response_stream(
+    session: "RealtimeSessionState",
+    response_stream: AsyncIterable[Any],
     *,
     modalities: Optional[list[str]] = None,
     tts_backend: Optional["TTSBackend"] = None,
     audio_output_format_type: str = "audio/pcm",
     audio_output_voice: str = "alloy",
     audio_output_speed: float = 1.0,
-) -> ChatStreamResult:
-    """
-    处理 chat 流式响应，同时流式发送文本给客户端。
-    
-    此函数会立即将文本 delta 发送给客户端，
-    实现真正的流式响应，降低首字延迟。
-    
-    返回 ChatStreamResult，包含完整文本内容或工具调用信息。
-    
-    事件时序（与 OpenAI 官方对齐）：
-    
-    文本响应：
-    1. ResponseCreatedEvent
-    2. ResponseOutputItemAddedEvent
-    3. ConversationItemAdded
-    4. ResponseContentPartAddedEvent
-    5. ResponseOutputTextDeltaEvent (多个)
-    6. ResponseOutputTextDoneEvent
-    7. ResponseContentPartDoneEvent
-    8. ResponseOutputItemDoneEvent
-    9. ConversationItemDone
-    10. ResponseDoneEvent
-    
-    工具调用：
-    1. ResponseCreatedEvent
-    2. ResponseOutputItemAddedEvent  
-    3. ConversationItemAdded
-    4. ResponseFunctionCallArgumentsDeltaEvent (多个)
-    5. ResponseFunctionCallArgumentsDoneEvent
-    6. ConversationItemDone
-    7. ResponseOutputItemDoneEvent
-    8. ResponseDoneEvent
-    """
+) -> ResponseStreamResult:
+    """Bridge upstream Responses stream events into Realtime server events."""
     active_modalities = _modalities_or_default(modalities)
     audio_mode = _is_audio_mode(active_modalities)
+    text_mode = _is_text_mode(active_modalities)
 
-    result = ChatStreamResult()
+    result = ResponseStreamResult()
     text_ctx: Optional[TextResponseContext] = None
     audio_ctx: Optional[AudioResponseContext] = None
     func_ctx: Optional[FunctionCallResponseContext] = None
-    mcp_ctx: Optional[McpCallResponseContext] = None
-    
-    # 用于累积工具调用参数
-    tool_name: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    is_mcp_tool: bool = False
-    mcp_server_label: Optional[str] = None
+
+    response_id_value: str | None = None
+    conversation_id_value = conversation_id()
+    message_item_id: str | None = None
+    function_item_id: str | None = None
+    function_call_id: str | None = None
+    function_name: str | None = None
+    function_arguments = ""
+    function_previous_item_id: str | None = None
+    mcp_item_ids: dict[int, str] = {}
+    mcp_previous_item_ids: dict[str, str | None] = {}
+    text_finished = False
+    audio_finished = False
+    function_finished = False
     sanitizer = SanitizedModelOutputAccumulator()
     
     try:
-        async for chunk in chat_stream:
-            # 🔴 检查是否需要取消（新转写事件到来）
+        async for event in response_stream:
             if session.is_cancel_requested():
-                logger.info("Chat stream cancelled due to new transcription")
+                logger.info("Responses stream cancelled due to new transcription")
                 result.was_cancelled = True
                 break
-            
-            delta = chunk.choices[0].delta
-            
-            # 处理工具调用
-            if delta.tool_calls:
-                tool_call = delta.tool_calls[0]
-                function = tool_call.function
-                
-                # 首次出现工具调用名称，判断是否为 MCP 工具并创建对应上下文
-                if function.name:
-                    tool_name = function.name
-                    tool_call_id = tool_call.id
-                    
-                    # 检查是否为 MCP 工具
-                    is_mcp_tool = session.is_mcp_tool(tool_name)
-                    
-                    if is_mcp_tool:
-                        mcp_server_label = session.get_mcp_server_for_tool(tool_name)
-                        mcp_ctx = McpCallResponseContext(
-                            session=session,
-                            name=tool_name,
-                            server_label=mcp_server_label,
-                            modalities=active_modalities,
-                        )
-                        await mcp_ctx.__aenter__()
-                        if function.arguments:
-                            await mcp_ctx.send_arguments_delta(function.arguments)
-                    else:
-                        # 普通 function call
-                        func_ctx = FunctionCallResponseContext(
-                            session=session,
-                            name=tool_name,
-                            call_id=tool_call_id,
-                            modalities=active_modalities,
-                        )
-                        await func_ctx.__aenter__()
-                        if function.arguments:
-                            await func_ctx.send_arguments_delta(function.arguments)
-                elif function.arguments:
-                    # 后续参数增量
-                    if mcp_ctx:
-                        await mcp_ctx.send_arguments_delta(function.arguments)
-                    elif func_ctx:
-                        await func_ctx.send_arguments_delta(function.arguments)
-            
-            # 🚀 流式发送文本内容
-            if delta.content:
-                result.raw_content += delta.content
-                display_delta, tts_delta = sanitizer.push(delta.content)
-                result.content = sanitizer.display_text
-                result.tts_text = sanitizer.tts_text
 
-                if audio_mode:
-                    if not display_delta and not tts_delta:
-                        continue
-                    if audio_ctx is None:
+            payload = _event_payload(event)
+            event_type = payload.get("type")
+
+            if event_type == "response.created":
+                response_id_value = _response_id_from_event(payload, response_id_value)
+                result.response_id = response_id_value
+                if response_id_value:
+                    await session.send_event(
+                        build_response_created_event(
+                            response_id=response_id_value,
+                            conversation_id=conversation_id_value,
+                            event_id=event_id(),
+                            modalities=active_modalities,
+                        )
+                    )
+                continue
+
+            if event_type == "response.in_progress":
+                response_id_value = _response_id_from_event(payload, response_id_value)
+                continue
+
+            if event_type == "response.output_item.added":
+                item = payload.get("item") or {}
+                item_type = item.get("type")
+                response_id_value = response_id_value or payload.get("response_id")
+                if item_type == "message":
+                    message_item_id = item.get("id") or item_id()
+                    if audio_mode:
                         if tts_backend is None:
                             raise RuntimeError("TTS backend is not configured for audio output")
                         audio_ctx = AudioResponseContext(
@@ -440,156 +497,298 @@ async def process_chat_stream(
                             format_type=audio_output_format_type,
                             voice=audio_output_voice,
                             speed=audio_output_speed,
+                            response_id_value=response_id_value,
+                            item_id_value=message_item_id,
+                            conversation_id_value=conversation_id_value,
+                            emit_response_lifecycle=False,
+                        )
+                        await audio_ctx.__aenter__()
+                    elif text_mode:
+                        text_ctx = TextResponseContext(
+                            session,
+                            modalities=active_modalities,
+                            response_id_value=response_id_value,
+                            item_id_value=message_item_id,
+                            conversation_id_value=conversation_id_value,
+                            emit_response_lifecycle=False,
+                        )
+                        await text_ctx.__aenter__()
+                elif item_type == "function_call":
+                    function_item_id = item.get("id") or item_id()
+                    function_call_id = item.get("call_id")
+                    function_name = item.get("name") or ""
+                    if response_id_value and function_call_id:
+                        func_ctx = FunctionCallResponseContext(
+                            session=session,
+                            name=function_name,
+                            call_id=function_call_id,
+                            modalities=active_modalities,
+                            response_id_value=response_id_value,
+                            item_id_value=function_item_id,
+                            conversation_id_value=conversation_id_value,
+                            emit_response_lifecycle=False,
+                            emit_arguments_done=False,
+                        )
+                        await func_ctx.__aenter__()
+                elif item_type in {"mcp_list_tools", "mcp_call"} and response_id_value:
+                    realtime_item = _realtime_passthrough_item(item)
+                    previous = await _send_item_added(
+                        session,
+                        response_id_value=response_id_value,
+                        item=realtime_item,
+                    )
+                    if item_type == "mcp_list_tools":
+                        mcp_item_ids[payload.get("output_index", 0)] = realtime_item["id"]
+                    mcp_previous_item_ids[realtime_item["id"]] = previous
+                continue
+
+            if event_type == "response.output_text.delta":
+                delta = payload.get("delta") or ""
+                result.raw_content += delta
+                display_delta, tts_delta = sanitizer.push(delta)
+                result.content = sanitizer.display_text
+                result.tts_text = sanitizer.tts_text
+
+                if audio_mode:
+                    if not display_delta and not tts_delta:
+                        continue
+                    if audio_ctx is None:
+                        if tts_backend is None:
+                            raise RuntimeError("TTS backend is not configured for audio output")
+                        message_item_id = message_item_id or payload.get("item_id") or item_id()
+                        audio_ctx = AudioResponseContext(
+                            session,
+                            tts_backend=tts_backend,
+                            modalities=active_modalities,
+                            format_type=audio_output_format_type,
+                            voice=audio_output_voice,
+                            speed=audio_output_speed,
+                            response_id_value=response_id_value,
+                            item_id_value=message_item_id,
+                            conversation_id_value=conversation_id_value,
+                            emit_response_lifecycle=False,
                         )
                         await audio_ctx.__aenter__()
                     await audio_ctx.add_model_text_delta(display_delta, tts_delta=tts_delta)
-                else:
+                elif text_mode:
                     if not display_delta:
                         continue
-                    # 延迟创建上下文，在第一个文本到达时才发送前置事件
                     if text_ctx is None:
-                        text_ctx = TextResponseContext(session, modalities=active_modalities)
+                        message_item_id = message_item_id or payload.get("item_id") or item_id()
+                        text_ctx = TextResponseContext(
+                            session,
+                            modalities=active_modalities,
+                            response_id_value=response_id_value,
+                            item_id_value=message_item_id,
+                            conversation_id_value=conversation_id_value,
+                            emit_response_lifecycle=False,
+                        )
                         await text_ctx.__aenter__()
                     await text_ctx.send_text_delta(display_delta)
-        
-        # 流结束后，如果有工具调用，记录结果
-        if mcp_ctx and tool_call_id:
-            # MCP 工具调用 - 完成参数发送阶段
-            await mcp_ctx.finish_arguments()
-            
-            result.tool_call = ToolCallInfo(
-                call_id=tool_call_id,
-                name=tool_name or "",
-                arguments=mcp_ctx.arguments,
-                is_mcp=True,
-                server_label=mcp_server_label,
-                mcp_ctx=mcp_ctx,  # 传递上下文给 servicer
-            )
-            logger.info(
-                f"MCP tool call detected: name={tool_name}, "
-                f"server_label={mcp_server_label}, arguments={mcp_ctx.arguments}"
-            )
-            # 注意：mcp_ctx 不在这里关闭，由 servicer 在执行调用后关闭
-        elif func_ctx and tool_call_id:
-            # 普通 function call
-            result.tool_call = ToolCallInfo(
-                call_id=tool_call_id,
-                name=tool_name or "",
-                arguments=func_ctx.arguments,
-                is_mcp=False,
-            )
-            logger.info(
-                f"Function call detected: name={tool_name}, call_id={tool_call_id}, "
-                f"arguments={func_ctx.arguments}"
-            )
-        elif result.content:
-            logger.info(f"Chat stream response sent: content='{result.content}'")
-    
-    except asyncio.CancelledError:
-        # 任务被真正取消（Task.cancel()）
-        logger.info("Chat stream task was cancelled by CancelledError")
-        result.was_cancelled = True
-        # 显式关闭生成器，停止底层 HTTP 流
-        if hasattr(chat_stream, 'aclose'):
-            try:
-                await chat_stream.aclose()
-            except Exception as e:
-                logger.debug(f"Error closing chat stream: {e}")
-        raise  # 重新抛出让调用者知道任务被取消
-    
-    finally:
-        # 确保上下文正确关闭，发送后置事件
-        audio_synthesis_error: Optional[Exception] = None
-        if audio_ctx is not None:
-            should_synthesize = (
-                not result.was_cancelled
-                and not result.has_tool_call
-                and bool(result.tts_text.strip())
-            )
-            if should_synthesize:
-                try:
-                    await audio_ctx.synthesize_audio()
-                except Exception as exc:  # pragma: no cover - defensive boundary
-                    audio_synthesis_error = exc
-                    logger.error("Audio synthesis failed: %s", exc)
 
-            await audio_ctx.finish(
-                cancelled=result.was_cancelled,
-                failed=audio_synthesis_error is not None,
-                error_code="audio_synthesis_failed" if audio_synthesis_error else None,
-                error_type="server_error" if audio_synthesis_error else None,
-            )
-            if audio_synthesis_error and hasattr(session, "writer"):
-                await session.writer.send_error(
-                    message=f"Audio synthesis failed: {audio_synthesis_error}",
-                    error_type="server_error",
-                    code="audio_synthesis_failed",
+            elif event_type == "response.function_call_arguments.delta":
+                delta = payload.get("delta") or ""
+                function_arguments += delta
+                if func_ctx:
+                    await func_ctx.send_arguments_delta(delta)
+
+            elif event_type == "response.function_call_arguments.done":
+                function_arguments = payload.get("arguments") or function_arguments
+                if function_call_id and response_id_value and function_item_id:
+                    await session.send_event(
+                        build_function_call_arguments_done(
+                            arguments=function_arguments,
+                            call_id=function_call_id,
+                            item_id=function_item_id,
+                            response_id=response_id_value,
+                            name=function_name or payload.get("name") or "",
+                        )
+                    )
+
+            elif event_type == "response.output_item.done":
+                item = payload.get("item") or {}
+                item_type = item.get("type")
+                if item_type == "message":
+                    if audio_ctx and not audio_finished:
+                        await _finish_audio_context(
+                            session=session,
+                            audio_ctx=audio_ctx,
+                            result=result,
+                        )
+                        audio_finished = True
+                    if text_ctx and not text_finished:
+                        await text_ctx.finish(cancelled=result.was_cancelled)
+                        text_finished = True
+                elif item_type == "function_call":
+                    if func_ctx and not function_finished:
+                        await func_ctx.__aexit__(None, None, None)
+                        function_finished = True
+                    function_call_id = item.get("call_id") or function_call_id
+                    function_name = item.get("name") or function_name
+                    function_arguments = item.get("arguments") or function_arguments
+                    if function_call_id:
+                        result.tool_call = ToolCallInfo(
+                            call_id=function_call_id,
+                            name=function_name or "",
+                            arguments=function_arguments,
+                        )
+                elif item_type in {"mcp_list_tools", "mcp_call"} and response_id_value:
+                    realtime_item = _realtime_passthrough_item(item)
+                    previous = mcp_previous_item_ids.get(realtime_item["id"])
+                    await _send_item_done(
+                        session,
+                        response_id_value=response_id_value,
+                        item=realtime_item,
+                        previous_item_id=previous,
+                    )
+
+            elif event_type in {
+                "response.mcp_list_tools.in_progress",
+                "response.mcp_list_tools.completed",
+                "response.mcp_list_tools.failed",
+            }:
+                await _send_mcp_status(
+                    session,
+                    source_type=event_type,
+                    item_id_value=payload.get("item_id")
+                    or mcp_item_ids.get(payload.get("output_index", 0)),
                 )
 
-        if text_ctx is not None:
+            elif event_type in {
+                "response.mcp_call_arguments.delta",
+                "response.mcp_call_arguments.done",
+                "response.mcp_call.in_progress",
+                "response.mcp_call.completed",
+                "response.mcp_call.failed",
+            }:
+                realtime_event = dict(payload)
+                realtime_event["event_id"] = event_id()
+                realtime_event.setdefault("response_id", response_id_value)
+                await session.send_event(realtime_event)
+
+            elif event_type == "response.completed":
+                response_id_value = _response_id_from_event(payload, response_id_value)
+                result.response_id = response_id_value
+                if hasattr(session, "mark_response_completed"):
+                    session.mark_response_completed(response_id_value)
+                if audio_ctx and not audio_finished:
+                    await _finish_audio_context(
+                        session=session,
+                        audio_ctx=audio_ctx,
+                        result=result,
+                    )
+                    audio_finished = True
+                if text_ctx and not text_finished:
+                    await text_ctx.finish(cancelled=False)
+                    text_finished = True
+                if func_ctx and not function_finished:
+                    await func_ctx.__aexit__(None, None, None)
+                    function_finished = True
+                if response_id_value:
+                    await session.send_event(
+                        build_response_done_event(
+                            response_id=response_id_value,
+                            conversation_id=conversation_id_value,
+                            event_id=event_id(),
+                            modalities=active_modalities,
+                        )
+                    )
+
+            elif event_type in {"response.failed", "response.incomplete", "response.error"}:
+                result.failed = True
+                response_id_value = _response_id_from_event(payload, response_id_value)
+                response_error = {}
+                response_payload = payload.get("response")
+                if isinstance(response_payload, dict):
+                    response_error = response_payload.get("error") or {}
+                if audio_ctx and not audio_finished:
+                    await audio_ctx.finish(failed=True)
+                    audio_finished = True
+                if text_ctx and not text_finished:
+                    await text_ctx.finish(cancelled=True)
+                    text_finished = True
+                if response_id_value:
+                    await session.send_event(
+                        build_response_done_event(
+                            response_id=response_id_value,
+                            conversation_id=conversation_id_value,
+                            event_id=event_id(),
+                            modalities=active_modalities,
+                            status="failed",
+                            error_code=response_error.get("code"),
+                            error_type="server_error",
+                        )
+                    )
+    
+    except asyncio.CancelledError:
+        logger.info("Responses stream task was cancelled by CancelledError")
+        result.was_cancelled = True
+        if hasattr(response_stream, "aclose"):
+            try:
+                await response_stream.aclose()
+            except Exception as e:
+                logger.debug("Error closing responses stream: %s", e)
+        raise
+    
+    finally:
+        if audio_ctx is not None and not audio_finished:
+            await _finish_audio_context(session=session, audio_ctx=audio_ctx, result=result)
+        if text_ctx is not None and not text_finished:
             await text_ctx.finish(cancelled=result.was_cancelled)
-        if func_ctx is not None:
+        if func_ctx is not None and not function_finished:
             await func_ctx.__aexit__(None, None, None)
-        # 注意：MCP 上下文需要在执行调用后关闭，这里不关闭
-        
-        # 🔴 如果被取消，手动将部分内容添加到历史记录
-        # 正常结束时，chat_session.get_result_record_itr 会自动处理
-        # 但被取消时流不会正常结束，需要手动添加
-        if result.was_cancelled and result.content:
-            from openai.types.chat import ChatCompletionMessage
-            cancelled_message = ChatCompletionMessage(
-                role="assistant",
-                content=result.content,  # 保存已生成的部分内容
-                tool_calls=[],
+
+        if result.was_cancelled and response_id_value:
+            await session.send_event(
+                build_response_done_event(
+                    response_id=response_id_value,
+                    conversation_id=conversation_id_value,
+                    event_id=event_id(),
+                    modalities=active_modalities,
+                    status="cancelled",
+                    reason=session.get_cancel_reason()
+                    if hasattr(session, "get_cancel_reason")
+                    else "turn_detected",
+                )
             )
-            session.chat_session.chat_history.append(cancelled_message)
-            logger.info(
-                f"Cancelled chat partial content saved to history: '{result.content}'"
-            )
-        elif not result.was_cancelled and (result.raw_content or result.has_tool_call):
-            session.chat_session.replace_last_assistant_message_content(result.content)
     
     return result
 
 
-async def send_tool_result_response(
-    session: "RealtimeSessionState",
-    chat_stream: Iterable[ChatCompletionChunk],
+async def _finish_audio_context(
     *,
-    modalities: Optional[list[str]] = None,
-    tts_backend: Optional["TTSBackend"] = None,
-    audio_output_format_type: str = "audio/pcm",
-    audio_output_voice: str = "alloy",
-    audio_output_speed: float = 1.0,
-):
-    """
-    发送工具调用结果后的响应流。
-    使用与主对话一致的响应上下文发送完整事件序列。
-    """
-    result = await process_chat_stream(
-        session=session,
-        chat_stream=chat_stream,
-        modalities=modalities,
-        tts_backend=tts_backend,
-        audio_output_format_type=audio_output_format_type,
-        audio_output_voice=audio_output_voice,
-        audio_output_speed=audio_output_speed,
+    session: "RealtimeSessionState",
+    audio_ctx: AudioResponseContext,
+    result: ResponseStreamResult,
+) -> None:
+    audio_synthesis_error: Optional[Exception] = None
+    should_synthesize = (
+        not result.was_cancelled
+        and not result.has_tool_call
+        and bool(result.tts_text.strip())
     )
+    if should_synthesize:
+        try:
+            await audio_ctx.synthesize_audio()
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            audio_synthesis_error = exc
+            logger.error("Audio synthesis failed: %s", exc)
 
-    logger.info("Tool result response sent: content='%s'", result.content)
+    await audio_ctx.finish(
+        cancelled=result.was_cancelled,
+        failed=audio_synthesis_error is not None,
+        error_code="audio_synthesis_failed" if audio_synthesis_error else None,
+        error_type="server_error" if audio_synthesis_error else None,
+    )
+    if audio_synthesis_error and hasattr(session, "writer"):
+        await session.writer.send_error(
+            message=f"Audio synthesis failed: {audio_synthesis_error}",
+            error_type="server_error",
+            code="audio_synthesis_failed",
+        )
 
 
 async def send_text_response(session: "RealtimeSessionState", content: str):
     """发送纯文本响应（使用上下文管理器）"""
     async with TextResponseContext(session) as ctx:
         await ctx.send_text_delta(content)
-
-
-async def send_chat_stream_response(
-    session: "RealtimeSessionState",
-    response_chunk: Iterable[str],
-):
-    """发送流式聊天响应（使用上下文管理器）"""
-    async with TextResponseContext(session) as ctx:
-        async for chunk in response_chunk:
-            await ctx.send_text_delta(chunk)

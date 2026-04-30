@@ -17,17 +17,17 @@ class _FakeSession:
     chunks: list[np.ndarray]
     audio_input_sample_rate: int = 24000
     asr_sample_rate: int = 16000
-    _current_chat_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    _current_response_task: asyncio.Task | None = field(default=None, init=False, repr=False)
 
     async def audio_iter(self) -> AsyncIterator[np.ndarray]:
         for chunk in self.chunks:
             yield chunk
 
-    def get_current_chat_task(self):
-        return self._current_chat_task
+    def get_current_response_task(self):
+        return self._current_response_task
 
-    def set_current_chat_task(self, task):
-        self._current_chat_task = task
+    def set_current_response_task(self, task):
+        self._current_response_task = task
 
     def request_cancel(self, reason: str = "turn_detected") -> None:
         del reason
@@ -55,7 +55,11 @@ class _FakeInferencer:
         async for chunk in audio:
             self.collected.append(chunk)
 
-        yield TranscriptionResult(transcript="ok", is_final=True)
+        yield TranscriptionResult(
+            transcript="ok",
+            is_final=True,
+            words=[("ok", 0.0, 0.5)],
+        )
 
 
 @pytest.mark.asyncio
@@ -80,8 +84,8 @@ async def test_transcription_worker_resamples_24k_to_16k_before_asr() -> None:
             inferencer=inferencer,
             session=session,
             interim_results=True,
-            is_chat_model=False,
-            chat_worker=AsyncMock(),
+            auto_response_enabled=False,
+            response_worker=AsyncMock(),
         )
 
     assert inferencer.sample_rate == 16000

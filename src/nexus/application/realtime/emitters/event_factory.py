@@ -371,12 +371,14 @@ def build_output_item_added_event(
 def build_conversation_item_added_event(
     item: conversation_item.RealtimeConversationItemAssistantMessage,
     event_id: str,
+    previous_item_id: Optional[str] = None,
 ) -> ConversationItemAdded:
     """构建 conversation.item.added 事件"""
     return ConversationItemAdded(
         event_id=event_id,
         item=item,
         type="conversation.item.added",
+        previous_item_id=previous_item_id,
     )
 
 
@@ -384,10 +386,12 @@ def build_content_part_added_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    *,
+    content_index: int = 0,
 ) -> ResponseContentPartAddedEvent:
     """构建 response.content_part.added 事件"""
     return ResponseContentPartAddedEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -404,10 +408,12 @@ def build_text_delta_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    *,
+    content_index: int = 0,
 ) -> ResponseTextDeltaEvent:
     """构建 response.output_text.delta 事件"""
     return ResponseTextDeltaEvent(
-        content_index=0,
+        content_index=content_index,
         delta=delta,
         event_id=event_id,
         item_id=item_id,
@@ -422,10 +428,12 @@ def build_text_done_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    *,
+    content_index: int = 0,
 ) -> ResponseTextDoneEvent:
     """构建 response.output_text.done 事件"""
     return ResponseTextDoneEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -441,10 +449,11 @@ def build_audio_delta_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    content_index: int = 0,
 ) -> ResponseAudioDeltaEvent:
     """构建 response.output_audio.delta 事件"""
     return ResponseAudioDeltaEvent(
-        content_index=0,
+        content_index=content_index,
         delta=delta,
         event_id=event_id,
         item_id=item_id,
@@ -459,10 +468,11 @@ def build_audio_done_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    content_index: int = 0,
 ) -> ResponseAudioDoneEvent:
     """构建 response.output_audio.done 事件"""
     return ResponseAudioDoneEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -477,10 +487,11 @@ def build_audio_transcript_delta_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    content_index: int = 0,
 ) -> ResponseAudioTranscriptDeltaEvent:
     """构建 response.output_audio_transcript.delta 事件"""
     return ResponseAudioTranscriptDeltaEvent(
-        content_index=0,
+        content_index=content_index,
         delta=delta,
         event_id=event_id,
         item_id=item_id,
@@ -496,10 +507,11 @@ def build_audio_transcript_done_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    content_index: int = 0,
 ) -> ResponseAudioTranscriptDoneEvent:
     """构建 response.output_audio_transcript.done 事件"""
     return ResponseAudioTranscriptDoneEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -514,10 +526,12 @@ def build_content_part_done_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    *,
+    content_index: int = 0,
 ) -> ResponseContentPartDoneEvent:
     """构建 response.content_part.done 事件"""
     return ResponseContentPartDoneEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -537,10 +551,11 @@ def build_audio_content_part_added_event(
     item_id: str,
     response_id: str,
     event_id: str,
+    content_index: int = 0,
 ) -> ResponseContentPartAddedEvent:
     """构建 audio response.content_part.added 事件"""
     return ResponseContentPartAddedEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -561,10 +576,11 @@ def build_audio_content_part_done_event(
     response_id: str,
     event_id: str,
     transcript: Optional[str],
+    content_index: int = 0,
 ) -> ResponseContentPartDoneEvent:
     """构建 audio response.content_part.done 事件"""
     return ResponseContentPartDoneEvent(
-        content_index=0,
+        content_index=content_index,
         event_id=event_id,
         item_id=item_id,
         output_index=0,
@@ -582,12 +598,14 @@ def build_audio_content_part_done_event(
 def build_conversation_item_done_event(
     item: conversation_item.RealtimeConversationItemAssistantMessage,
     event_id: str,
+    previous_item_id: Optional[str] = None,
 ) -> ConversationItemDone:
     """构建 conversation.item.done 事件"""
     return ConversationItemDone(
         event_id=event_id,
         item=item,
         type="conversation.item.done",
+        previous_item_id=previous_item_id,
     )
 
 
@@ -668,25 +686,6 @@ def build_function_call_conversation_item_done_event(
         type="conversation.item.done",
         previous_item_id=previous_item_id,
     )
-
-
-def build_conversation_item_created_event(
-    item_id: str,
-    item_type: str = "function_call_output",
-) -> dict:
-    """
-    构建 conversation.item.created 事件
-    用于确认客户端发送的 conversation.item.create 已被接收和处理
-    """
-    return {
-        "type": "conversation.item.created",
-        "event_id": str(uuid.uuid4()),
-        "item": {
-            "id": item_id,
-            "type": item_type,
-            "status": "completed",
-        },
-    }
 
 
 # ============ MCP specific events ============

@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, AsyncIterator, Generator, Iterator, List, Optional, Tuple
 
 import grpc
@@ -50,13 +50,75 @@ async def async_request_iter(
 class TranscriptionResult:
     transcript: str
     is_final: bool
-    words: List[Tuple[str, float, float]] = None  # [(word, start_time, end_time), ...]
-    
+    words: List[Tuple[str, float, float]] | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
+    speaker_confidence: float | None = None
+    language_code: str | None = None
+    language_confidence: float | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    speaker_changed: bool = False
+    turn_completed: bool = False
+
     def get_end_time(self) -> float:
         """获取最后一个词的结束时间戳"""
         if self.words and len(self.words) > 0:
             return self.words[-1][2]  # end_time of last word
         return 0.0
+
+
+def _duration_to_seconds(duration) -> float:
+    return duration.seconds + duration.nanos / 1e9
+
+
+def _extract_words(alternative: pb2.SpeechRecognitionAlternative) -> List[Tuple[str, float, float]] | None:
+    words = [
+        (
+            word_info.word,
+            _duration_to_seconds(word_info.start_time),
+            _duration_to_seconds(word_info.end_time),
+        )
+        for word_info in alternative.words
+    ]
+    return words or None
+
+
+def _extract_transcription_result(
+    result: pb2.StreamingRecognitionResult,
+) -> TranscriptionResult:
+    alternative = result.alternative
+
+    speaker_id: str | None = None
+    speaker_name: str | None = None
+    speaker_confidence: float | None = None
+    if alternative.HasField("speaker"):
+        speaker = alternative.speaker
+        speaker_id = speaker.id or None
+        speaker_name = speaker.name or None
+        if speaker.HasField("confidence"):
+            speaker_confidence = speaker.confidence
+
+    language_code: str | None = None
+    language_confidence: float | None = None
+    if alternative.HasField("language"):
+        language = alternative.language
+        language_code = language.code or None
+        if language.HasField("confidence"):
+            language_confidence = language.confidence
+
+    return TranscriptionResult(
+        transcript=alternative.transcript,
+        is_final=result.is_final,
+        words=_extract_words(alternative),
+        speaker_id=speaker_id,
+        speaker_name=speaker_name,
+        speaker_confidence=speaker_confidence,
+        language_code=language_code,
+        language_confidence=language_confidence,
+        metadata=dict(alternative.metadata),
+        speaker_changed=alternative.speaker_changed,
+        turn_completed=alternative.turn_completed,
+    )
 
 
 class Inferencer:
@@ -118,24 +180,10 @@ class Inferencer:
 
             for response in responses:
                 for result in response.results:
-                    alternative = result.alternative
-                    transcript = alternative.transcript
-                    is_final = result.is_final
-                    if not interim_results and not is_final:
+                    if not interim_results and not result.is_final:
                         continue
-                    
-                    # 解析词级时间戳
-                    words = []
-                    for word_info in alternative.words:
-                        start_time = word_info.start_time.seconds + word_info.start_time.nanos / 1e9
-                        end_time = word_info.end_time.seconds + word_info.end_time.nanos / 1e9
-                        words.append((word_info.word, start_time, end_time))
-                    
-                    yield TranscriptionResult(
-                        transcript=transcript,
-                        is_final=is_final,
-                        words=words if words else None
-                    )
+
+                    yield _extract_transcription_result(result)
         except grpc.RpcError as err:
             logger.error("gRPC error during ASR inference: %s", err)
         except Exception as err:
@@ -214,24 +262,10 @@ class AsyncInferencer:
 
             async for response in responses:
                 for result in response.results:
-                    alternative = result.alternative
-                    transcript = alternative.transcript
-                    is_final = result.is_final
-                    if not interim_results and not is_final:
+                    if not interim_results and not result.is_final:
                         continue
-                    
-                    # 解析词级时间戳
-                    words = []
-                    for word_info in alternative.words:
-                        start_time = word_info.start_time.seconds + word_info.start_time.nanos / 1e9
-                        end_time = word_info.end_time.seconds + word_info.end_time.nanos / 1e9
-                        words.append((word_info.word, start_time, end_time))
-                    
-                    yield TranscriptionResult(
-                        transcript=transcript,
-                        is_final=is_final,
-                        words=words if words else None
-                    )
+
+                    yield _extract_transcription_result(result)
         except grpc.RpcError as err:
             logger.error("gRPC error during async ASR inference: %s", err)
         except Exception as err:

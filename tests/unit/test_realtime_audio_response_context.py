@@ -11,12 +11,22 @@ from nexus.infrastructure.tts.backend import DuplexAudioChunk
 class CollectingSession:
     def __init__(self):
         self.events = []
+        self._conversation_tail_item_id = None
+        self._conversation_previous_item_ids = {}
 
     async def send_event(self, event):
         self.events.append(event)
 
     def get_cancel_reason(self) -> str:
         return "turn_detected"
+
+    def register_server_conversation_item(self, item_id: str):
+        if item_id in self._conversation_previous_item_ids:
+            return self._conversation_previous_item_ids[item_id]
+        previous_item_id = self._conversation_tail_item_id
+        self._conversation_previous_item_ids[item_id] = previous_item_id
+        self._conversation_tail_item_id = item_id
+        return previous_item_id
 
 
 class FakeTTSInferencer:
@@ -81,7 +91,7 @@ class FakeDuplexBackend:
 
 
 @pytest.mark.asyncio
-async def test_audio_context_emits_audio_and_transcript_events_without_text_events() -> None:
+async def test_audio_context_emits_transcript_events_before_audio() -> None:
     session = CollectingSession()
     ctx = AudioResponseContext(
         session=session,
@@ -95,7 +105,7 @@ async def test_audio_context_emits_audio_and_transcript_events_without_text_even
     await ctx.__aenter__()
     await ctx.add_model_text_delta("你好，音频模式。")
     event_types_before_audio = [event.type for event in session.events]
-    assert "response.output_audio_transcript.delta" not in event_types_before_audio
+    assert "response.output_audio_transcript.delta" in event_types_before_audio
     await ctx.synthesize_audio()
     await ctx.finish()
 
@@ -107,8 +117,8 @@ async def test_audio_context_emits_audio_and_transcript_events_without_text_even
     assert "response.output_text.delta" not in event_types
     assert "response.output_text.done" not in event_types
     assert all(not isinstance(event, dict) for event in session.events)
-    assert event_types.index("response.output_audio.delta") < event_types.index(
-        "response.output_audio_transcript.delta"
+    assert event_types.index("response.output_audio_transcript.delta") < event_types.index(
+        "response.output_audio.delta"
     )
 
 
@@ -128,7 +138,7 @@ async def test_audio_context_with_text_modalities_keeps_audio_transcript_events(
     await ctx.add_model_text_delta("第一段。")
     await ctx.add_model_text_delta("第二段。")
     event_types_before_audio = [event.type for event in session.events]
-    assert "response.output_audio_transcript.delta" not in event_types_before_audio
+    assert "response.output_audio_transcript.delta" in event_types_before_audio
     await ctx.synthesize_audio()
     await ctx.finish()
 
@@ -137,10 +147,10 @@ async def test_audio_context_with_text_modalities_keeps_audio_transcript_events(
     assert "response.output_audio.done" in event_types
     assert "response.output_audio_transcript.delta" in event_types
     assert "response.output_audio_transcript.done" in event_types
-    assert "response.output_text.delta" not in event_types
-    assert "response.output_text.done" not in event_types
-    assert event_types.index("response.output_audio.delta") < event_types.index(
-        "response.output_audio_transcript.delta"
+    assert "response.output_text.delta" in event_types
+    assert "response.output_text.done" in event_types
+    assert event_types.index("response.output_audio_transcript.delta") < event_types.index(
+        "response.output_audio.delta"
     )
 
 
@@ -161,14 +171,14 @@ async def test_audio_context_duplex_backend_emits_audio_before_finish() -> None:
     await ctx.__aenter__()
     await ctx.add_model_text_delta("hello")
     event_types_before_audio = [event.type for event in session.events]
-    assert "response.output_audio_transcript.delta" not in event_types_before_audio
+    assert "response.output_audio_transcript.delta" in event_types_before_audio
     await asyncio.sleep(0)
 
     event_types = [event.type for event in session.events]
     assert "response.output_audio.delta" in event_types
     assert "response.output_audio_transcript.delta" in event_types
-    assert event_types.index("response.output_audio.delta") < event_types.index(
-        "response.output_audio_transcript.delta"
+    assert event_types.index("response.output_audio_transcript.delta") < event_types.index(
+        "response.output_audio.delta"
     )
     assert backend.session.sent_text == ["hello"]
 
@@ -229,5 +239,62 @@ async def test_audio_context_duplex_backend_closes_on_cancel() -> None:
 
     assert backend.session.closed is True
     event_types = [event.type for event in session.events]
-    assert "response.output_audio_transcript.delta" not in event_types
-    assert "response.output_audio_transcript.done" not in event_types
+    assert "response.output_audio_transcript.delta" in event_types
+    assert "response.output_audio_transcript.done" in event_types
+
+
+@pytest.mark.asyncio
+async def test_audio_context_emits_transcript_done_even_without_audio() -> None:
+    session = CollectingSession()
+    ctx = AudioResponseContext(
+        session=session,
+        tts_backend=FakeTTSInferencer(),
+        modalities=["audio"],
+        format_type="audio/pcm",
+        voice="alloy",
+        speed=1.0,
+    )
+
+    await ctx.__aenter__()
+    await ctx.add_model_text_delta("没有音频也要有文本")
+    await ctx.finish()
+
+    transcript_done_events = [
+        event
+        for event in session.events
+        if getattr(event, "type", None) == "response.output_audio_transcript.done"
+    ]
+
+    assert len(transcript_done_events) == 1
+    assert transcript_done_events[0].transcript == "没有音频也要有文本"
+
+
+@pytest.mark.asyncio
+async def test_audio_context_reuses_previous_item_id_for_added_and_done() -> None:
+    session = CollectingSession()
+    session.register_server_conversation_item("user_1")
+    ctx = AudioResponseContext(
+        session=session,
+        tts_backend=FakeTTSInferencer(),
+        modalities=["audio"],
+        format_type="audio/pcm",
+        voice="alloy",
+        speed=1.0,
+    )
+
+    await ctx.__aenter__()
+    await ctx.add_model_text_delta("audio turn")
+    await ctx.finish()
+
+    added_event = next(
+        event
+        for event in session.events
+        if getattr(event, "type", None) == "conversation.item.added"
+    )
+    done_event = next(
+        event
+        for event in session.events
+        if getattr(event, "type", None) == "conversation.item.done"
+    )
+    assert added_event.previous_item_id == "user_1"
+    assert done_event.previous_item_id == "user_1"

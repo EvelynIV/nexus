@@ -4,11 +4,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-_SID_OTHERS_PATTERN = re.compile(r"^\s*<sid\s+<others>>\s*(.*)$", re.DOTALL)
-_SID_SPEAKER_PATTERN = re.compile(
-    r"^\s*<sid\s+([^\s<>]+)\s+([0-9]+(?:\.[0-9]+)?)>\s*(.*)$",
-    re.DOTALL,
-)
+from nexus.infrastructure.asr import TranscriptionResult
+
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _CJK_SPACE_PATTERN = re.compile(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])")
 _TTS_DELIMITER_SPACING_PATTERN = re.compile(r"\s*([。！？；])\s*")
@@ -45,7 +42,14 @@ class PreparedRealtimeUserTurn:
     raw_transcript: str
     display_transcript: str
     model_text: str
+    speaker_id: str | None = None
     speaker_name: str | None = None
+    speaker_confidence: float | None = None
+    language_code: str | None = None
+    language_confidence: float | None = None
+    metadata: dict[str, str] | None = None
+    speaker_changed: bool = False
+    turn_completed: bool = False
 
 
 @dataclass
@@ -70,11 +74,12 @@ class SanitizedModelOutputAccumulator:
         return display_delta, tts_delta
 
 
-def prepare_realtime_user_turn(transcript: str) -> PreparedRealtimeUserTurn:
-    speaker_name, display_transcript = parse_asr_speaker_prefix(transcript)
-    if speaker_name:
+def prepare_realtime_user_turn(transcription_result: TranscriptionResult) -> PreparedRealtimeUserTurn:
+    display_transcript = transcription_result.transcript
+    speaker_label = transcription_result.speaker_name or transcription_result.speaker_id
+    if speaker_label:
         model_text = (
-            f"当前说话人是{speaker_name}。"
+            f"当前说话人是{speaker_label}。"
             "这只是辅助上下文，不要直接复述说话人标签。"
             f"用户说：{display_transcript}"
         )
@@ -82,26 +87,18 @@ def prepare_realtime_user_turn(transcript: str) -> PreparedRealtimeUserTurn:
         model_text = display_transcript
 
     return PreparedRealtimeUserTurn(
-        raw_transcript=transcript,
+        raw_transcript=transcription_result.transcript,
         display_transcript=display_transcript,
         model_text=model_text,
-        speaker_name=speaker_name,
+        speaker_id=transcription_result.speaker_id,
+        speaker_name=transcription_result.speaker_name,
+        speaker_confidence=transcription_result.speaker_confidence,
+        language_code=transcription_result.language_code,
+        language_confidence=transcription_result.language_confidence,
+        metadata=dict(transcription_result.metadata),
+        speaker_changed=transcription_result.speaker_changed,
+        turn_completed=transcription_result.turn_completed,
     )
-
-
-def parse_asr_speaker_prefix(transcript: str) -> tuple[str | None, str]:
-    if not transcript:
-        return None, ""
-
-    others_match = _SID_OTHERS_PATTERN.match(transcript)
-    if others_match:
-        return None, others_match.group(1).strip()
-
-    speaker_match = _SID_SPEAKER_PATTERN.match(transcript)
-    if speaker_match:
-        return speaker_match.group(1), speaker_match.group(3).strip()
-
-    return None, transcript
 
 
 def sanitize_model_output_for_display(text: str) -> str:

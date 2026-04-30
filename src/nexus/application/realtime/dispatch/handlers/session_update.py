@@ -7,4 +7,9 @@ from ..context import RealtimeDispatchContext
 
 async def handle_session_update(event: RealtimeClientEvent, ctx: RealtimeDispatchContext) -> None:
     assert isinstance(event, SessionUpdateEvent)
-    await ctx.service.apply_session_update(ctx.session, event.session, model=event.session.model)
+    await ctx.service.apply_session_update(
+        ctx.session,
+        event.session,
+        model=event.session.model,
+        reply_sink=ctx.reply_sink,
+    )

@@ -15,6 +15,12 @@ from .ids import event_id
 _SERVER_EVENT_ADAPTER: TypeAdapter[RealtimeServerEvent] = TypeAdapter(RealtimeServerEvent)
 
 
+def serialize_realtime_server_event(event: Any) -> str:
+    payload = _to_payload(event)
+    validated = _SERVER_EVENT_ADAPTER.validate_python(payload)
+    return json.dumps(validated.model_dump(exclude_none=True), ensure_ascii=False)
+
+
 class RealtimeServerWriter:
     """Send only schema-valid Realtime server events."""
 
@@ -23,12 +29,8 @@ class RealtimeServerWriter:
         self._lock = asyncio.Lock()
 
     async def send_event(self, event: Any) -> None:
-        payload = self._to_payload(event)
-        validated = _SERVER_EVENT_ADAPTER.validate_python(payload)
         async with self._lock:
-            await self._websocket.send_text(
-                json.dumps(validated.model_dump(exclude_none=True), ensure_ascii=False)
-            )
+            await self._websocket.send_text(serialize_realtime_server_event(event))
 
     async def send_error(
         self,
@@ -52,9 +54,9 @@ class RealtimeServerWriter:
         )
         await self.send_event(error_event)
 
-    def _to_payload(self, event: Any) -> Mapping[str, Any]:
-        if isinstance(event, Mapping):
-            return event
-        if hasattr(event, "model_dump"):
-            return event.model_dump(exclude_none=True)
-        raise TypeError(f"Unsupported event payload type: {type(event)!r}")
+def _to_payload(event: Any) -> Mapping[str, Any]:
+    if isinstance(event, Mapping):
+        return event
+    if hasattr(event, "model_dump"):
+        return event.model_dump(exclude_none=True)
+    raise TypeError(f"Unsupported event payload type: {type(event)!r}")
