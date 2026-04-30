@@ -1,6 +1,6 @@
-from nexus.sessions.chat_session import AsyncChatSession, ChatSession
+from nexus.sessions.responses_session import ResponsesSession
 
-__all__ = ["AsyncChatSession", "ChatSession", "RealtimeSession"]
+__all__ = ["ResponsesSession", "RealtimeSession"]
 
 
 def __getattr__(name: str):

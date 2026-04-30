@@ -1,0 +1,6 @@
+textual>=0.86,<1.0
+sounddevice>=0.5,<1.0
+aiortc>=1.10,<2.0
+httpx>=0.28,<1.0
+python-dotenv>=1.0,<2.0
+numpy<2.3

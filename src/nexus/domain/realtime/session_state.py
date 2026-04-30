@@ -3,22 +3,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import Any, TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
-from openai.types.chat import ChatCompletionChunk
 from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 
-from nexus.application.realtime.protocol.tools import to_chat_tools
+from nexus.application.realtime.protocol.tools import to_response_tools
 from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
-from nexus.infrastructure.mcp import McpToolRegistry
-from nexus.sessions.chat_session import AsyncChatSession
+from nexus.sessions.responses_session import ResponsesSession
 
 if TYPE_CHECKING:
     from asyncio import Task
-    from nexus.application.realtime.protocol.server_writer import RealtimeServerWriter
+    from nexus.application.realtime.protocol import RealtimeEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +25,13 @@ logger = logging.getLogger(__name__)
 class RealtimeSessionState:
     """Domain session state for a realtime websocket connection."""
 
-    chat_session: AsyncChatSession
-    chat_model: str
-    writer: "RealtimeServerWriter"
+    responses_session: ResponsesSession
+    response_model: str
+    writer: "RealtimeEventSink"
 
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str = field(default_factory=lambda: f"sess_{uuid.uuid4().hex}")
     tools: List[RealtimeFunctionTool] = field(default_factory=list)
-    mcp_registry: McpToolRegistry = field(default_factory=McpToolRegistry)
+    mcp_tools: list[dict[str, Any]] = field(default_factory=list)
 
     audio_input_format_type: str = "audio/pcm"
     audio_input_sample_rate: int = 24000
@@ -43,8 +41,15 @@ class RealtimeSessionState:
     audio_output_voice: str = "alloy"
     audio_output_speed: float = 1.0
     audio_queue: asyncio.Queue[np.ndarray] = field(default_factory=asyncio.Queue)
+    audio_output_queue: asyncio.Queue[bytes | None] = field(default_factory=asyncio.Queue)
+    _conversation_tail_item_id: Optional[str] = field(default=None, repr=False)
+    _conversation_previous_item_ids: Dict[str, Optional[str]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    _audio_voice_locked: bool = field(default=False, repr=False)
 
-    _current_chat_task: Optional["Task"] = field(default=None, repr=False)
+    _current_response_task: Optional["Task"] = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _cancel_reason: str = field(default="turn_detected", repr=False)
 
@@ -65,11 +70,11 @@ class RealtimeSessionState:
     def get_cancel_reason(self) -> str:
         return self._cancel_reason
 
-    def set_current_chat_task(self, task: Optional["Task"]) -> None:
-        self._current_chat_task = task
+    def set_current_response_task(self, task: Optional["Task"]) -> None:
+        self._current_response_task = task
 
-    def get_current_chat_task(self) -> Optional["Task"]:
-        return self._current_chat_task
+    def get_current_response_task(self) -> Optional["Task"]:
+        return self._current_response_task
 
     async def audio_iter(self) -> AsyncGenerator[np.ndarray, None]:
         while True:
@@ -83,6 +88,13 @@ class RealtimeSessionState:
 
     def get_output_modalities(self) -> List[str]:
         return self.output_modalities.copy()
+
+    async def push_audio_output(self, pcm_bytes: bytes) -> None:
+        if pcm_bytes:
+            await self.audio_output_queue.put(bytes(pcm_bytes))
+
+    async def close_audio_output(self) -> None:
+        await self.audio_output_queue.put(None)
 
     def update_audio_output_config(
         self,
@@ -111,42 +123,47 @@ class RealtimeSessionState:
             "sample_rate": self.audio_input_sample_rate,
         }
 
-    def get_all_tools(self) -> List[RealtimeFunctionTool]:
-        all_tools = list(self.tools)
-        all_tools.extend(self.mcp_registry.to_realtime_function_tools())
-        return all_tools
+    def lock_audio_voice(self) -> None:
+        self._audio_voice_locked = True
 
-    def is_mcp_tool(self, tool_name: str) -> bool:
-        return self.mcp_registry.is_mcp_tool(tool_name)
+    def is_audio_voice_locked(self) -> bool:
+        return self._audio_voice_locked
 
-    def get_mcp_server_for_tool(self, tool_name: str) -> Optional[str]:
-        return self.mcp_registry.get_server_for_tool(tool_name)
+    def register_server_conversation_item(self, item_id: str) -> Optional[str]:
+        """Register a server-generated item in the conversation order chain."""
+        if item_id in self._conversation_previous_item_ids:
+            return self._conversation_previous_item_ids[item_id]
 
-    async def chat(self, user_turn: PreparedRealtimeUserTurn) -> AsyncGenerator[ChatCompletionChunk, None]:
-        chat_stream_resp = self.chat_session.chat(
-            user_message=user_turn.model_text,
-            model=self.chat_model,
+        previous_item_id = self._conversation_tail_item_id
+        self._conversation_previous_item_ids[item_id] = previous_item_id
+        self._conversation_tail_item_id = item_id
+        return previous_item_id
+
+    def get_registered_previous_item_id(self, item_id: str) -> Optional[str]:
+        """Return the registered predecessor for a conversation item."""
+        return self._conversation_previous_item_ids.get(item_id)
+
+    def get_response_tools(self) -> list[dict[str, Any]]:
+        return to_response_tools(self.tools, self.mcp_tools)
+
+    async def respond_to_user(self, user_turn: PreparedRealtimeUserTurn) -> AsyncIterable[Any]:
+        self.responses_session.add_user_message(user_turn.model_text)
+        return await self.responses_session.create_response(
+            model=self.response_model,
             stream=True,
-            tools=to_chat_tools(self.get_all_tools()),
+            tools=self.get_response_tools(),
         )
-        async for chunk in chat_stream_resp:
-            yield chunk
 
     def add_tool_result(self, tool_call_id: str, content: str) -> None:
-        tool_msg = {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": content,
-        }
-        self.chat_session.chat_history.append(tool_msg)
-        logger.info("Tool result added to history: tool_call_id=%s", tool_call_id)
+        self.responses_session.add_function_call_output(tool_call_id, content)
+        logger.info("Function call output queued: call_id=%s", tool_call_id)
 
-    async def continue_conversation(self) -> AsyncGenerator[ChatCompletionChunk, None]:
-        stream_resp = await self.chat_session.chat_inferencer.chat(
-            messages=self.chat_session.chat_history,
-            model=self.chat_model,
+    async def continue_conversation(self) -> AsyncIterable[Any]:
+        return await self.responses_session.create_response(
+            model=self.response_model,
             stream=True,
-            tools=to_chat_tools(self.get_all_tools()),
+            tools=self.get_response_tools(),
         )
-        async for chunk in self.chat_session.get_result_record_itr(stream_resp):
-            yield chunk
+
+    def mark_response_completed(self, response_id: str | None) -> None:
+        self.responses_session.mark_response_completed(response_id)

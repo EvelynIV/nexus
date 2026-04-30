@@ -1,17 +1,16 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 
 @dataclass
 class NexusConfig:
     asr_grpc_addr: str
-    chat_base_url: str
-    chat_api_key: str
-    tts_base_url: str | None = None
-    tts_api_key: str | None = None
+    responses_base_url: str | None = None
+    responses_api_key: str | None = None
+    realtime_api_key: str | None = None
+    realtime_client_secret_ttl_seconds: int = 600
+    realtime_session_max_seconds: int = 3600
 
-    tts_backend: Literal["openai", "grpc"] = "openai"
     tts_grpc_addr: str | None = None
     tts_grpc_preset_voice_id: str | None = None
     tts_grpc_ref_voice_dir: str | None = None
@@ -19,22 +18,23 @@ class NexusConfig:
     tts_grpc_decoder_chunk_size: int = 50
     tts_grpc_text_chunk_size: int = 1
     asr_interim_results: bool = True
-    asr_hide_metadata: bool = True
+
+    asterisk_ingress_enabled: bool = False
+    asterisk_ari_url: str = "http://127.0.0.1:8088/ari"
+    asterisk_ari_user: str = "voicebot"
+    asterisk_ari_password: str = "12345678"
+    asterisk_stasis_app: str = "nexus"
+    asterisk_external_host: str = "127.0.0.1"
+    asterisk_rtp_port_start: int = 4000
+    asterisk_rtp_port_end: int = 4099
+    asterisk_codec: str = "ulaw"
+    asterisk_refer_endpoint_prefix: str | None = None
+    realtime_webhook_url: str | None = None
+    realtime_webhook_secret: str | None = None
 
     def __post_init__(self) -> None:
-        self.tts_backend = self.tts_backend.lower()
-        if self.tts_backend not in {"openai", "grpc"}:
-            raise ValueError("tts_backend must be either 'openai' or 'grpc'")
-
-        if self.tts_backend == "openai":
-            if not self.tts_base_url or not self.tts_api_key:
-                raise ValueError(
-                    "tts_base_url and tts_api_key are required when tts_backend='openai'"
-                )
-            return
-
         if not self.tts_grpc_addr:
-            raise ValueError("tts_grpc_addr is required when tts_backend='grpc'")
+            raise ValueError("tts_grpc_addr is required")
 
         has_preset_voice = bool(self.tts_grpc_preset_voice_id)
         has_reference_voice_dir = bool(self.tts_grpc_ref_voice_dir)
@@ -61,3 +61,13 @@ class NexusConfig:
             raise ValueError("tts_grpc_decoder_chunk_size must be greater than 0")
         if self.tts_grpc_text_chunk_size <= 0:
             raise ValueError("tts_grpc_text_chunk_size must be greater than 0")
+        if self.realtime_client_secret_ttl_seconds <= 0:
+            raise ValueError("realtime_client_secret_ttl_seconds must be greater than 0")
+        if self.realtime_session_max_seconds <= 0:
+            raise ValueError("realtime_session_max_seconds must be greater than 0")
+        if self.asterisk_codec not in {"ulaw", "alaw"}:
+            raise ValueError("asterisk_codec must be 'ulaw' or 'alaw'")
+        if self.asterisk_rtp_port_start <= 0 or self.asterisk_rtp_port_end <= 0:
+            raise ValueError("Asterisk RTP port range must be positive")
+        if self.asterisk_rtp_port_start > self.asterisk_rtp_port_end:
+            raise ValueError("asterisk_rtp_port_start must be <= asterisk_rtp_port_end")
