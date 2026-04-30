@@ -51,7 +51,7 @@ class RealtimeSessionController:
         if self._transcription_task is None:
             self._transcription_task = await self.service.start_transcription_worker(
                 self.session,
-                is_chat_model="transcribe" not in self.model.lower(),
+                auto_response_enabled="transcribe" not in self.model.lower(),
             )
 
     async def attach_sink(self, sink: RealtimeReplySink, *, send_session_created: bool = False) -> None:

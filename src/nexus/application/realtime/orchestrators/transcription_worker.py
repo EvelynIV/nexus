@@ -38,16 +38,16 @@ async def run_transcription_worker(
     inferencer: AsyncInferencer,
     session: RealtimeSessionState,
     interim_results: bool,
-    is_chat_model: bool,
-    chat_worker: Callable[[RealtimeSessionState, PreparedRealtimeUserTurn], Awaitable[None]],
+    auto_response_enabled: bool,
+    response_worker: Callable[[RealtimeSessionState, PreparedRealtimeUserTurn], Awaitable[None]],
 ) -> None:
-    """Stream ASR results and trigger downstream chat orchestration.
+    """Stream ASR results and trigger downstream Responses orchestration.
 
     When *interim_results* is ``True`` the worker sends incremental
     ``conversation.item.input_audio_transcription.delta`` events for
     every non-final ASR result, giving the client a real-time view of
-    the ongoing transcription.  Only ``is_final=True`` results trigger
-    the downstream chat worker.
+    the ongoing transcription. Only final ASR results trigger the
+    downstream Responses worker when automatic responses are enabled.
     """
     tracker = TranscriptionStreamTracker()
 
@@ -87,7 +87,7 @@ async def run_transcription_worker(
             continue
 
         if not asr_result.is_final:
-            # Interim result – send streaming delta, do NOT trigger chat
+            # Interim result: send streaming delta, do not trigger a model response.
             try:
                 await send_transcribe_interim(
                     session,
@@ -110,21 +110,21 @@ async def run_transcription_worker(
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("Error sending transcribe response: %s", exc)
 
-        if not is_chat_model:
+        if not auto_response_enabled:
             continue
 
-        current_task = session.get_current_chat_task()
+        current_task = session.get_current_response_task()
         if current_task is not None and not current_task.done():
-            logger.info("New transcription received, cancelling current chat task")
+            logger.info("New transcription received, cancelling current response task")
             session.request_cancel()
             current_task.cancel()
             try:
                 await current_task
             except asyncio.CancelledError:
-                logger.info("Chat task cancelled")
+                logger.info("Response task cancelled")
             except Exception as exc:  # pragma: no cover - defensive logging
-                logger.warning("Error awaiting cancelled chat task: %s", exc)
+                logger.warning("Error awaiting cancelled response task: %s", exc)
 
         session.reset_cancel()
-        chat_task = asyncio.create_task(chat_worker(session, prepared_turn))
-        session.set_current_chat_task(chat_task)
+        response_task = asyncio.create_task(response_worker(session, prepared_turn))
+        session.set_current_response_task(response_task)

@@ -319,7 +319,7 @@ class AsteriskCallSession:
                 writer=self.broadcaster,
                 output_modalities=session_config.get("output_modalities", ["audio"]),
                 tools=[],
-                chat_model=session_config["model"],
+                response_model=session_config["model"],
                 session_id=session_config["id"],
             )
             self.controller = RealtimeSessionController(

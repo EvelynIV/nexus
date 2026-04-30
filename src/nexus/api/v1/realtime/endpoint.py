@@ -66,7 +66,7 @@ async def realtime_endpoint_worker(
             writer=broadcaster,
             output_modalities=["text"],
             tools=[],
-            chat_model=model,
+            response_model=model,
         )
     except Exception as exc:
         await writer.send_error(

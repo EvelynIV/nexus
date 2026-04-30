@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from nexus.application.chat import ChatCompletionUseCase
+from nexus.application.responses import ResponsesUseCase
 from nexus.application.realtime.service import RealtimeApplicationService
 from nexus.application.transcribe import TranscribeUseCase
 from nexus.application.tts import TextToSpeechUseCase
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class AppContainer:
     config: NexusConfig
     realtime: RealtimeApplicationService
-    chat: ChatCompletionUseCase
+    responses: ResponsesUseCase
     transcribe: TranscribeUseCase
     tts: TextToSpeechUseCase
 
@@ -39,17 +39,17 @@ def configure(engine_config: NexusConfig) -> None:
     realtime = RealtimeApplicationService(
         grpc_addr=engine_config.asr_grpc_addr,
         interim_results=engine_config.asr_interim_results,
-        chat_base_url=engine_config.chat_base_url,
-        chat_api_key=engine_config.chat_api_key,
+        responses_base_url=engine_config.responses_base_url,
+        responses_api_key=engine_config.responses_api_key,
         tts_backend=tts_backend,
     )
 
     _container = AppContainer(
         config=engine_config,
         realtime=realtime,
-        chat=ChatCompletionUseCase(
-            base_url=engine_config.chat_base_url,
-            api_key=engine_config.chat_api_key,
+        responses=ResponsesUseCase(
+            base_url=engine_config.responses_base_url,
+            api_key=engine_config.responses_api_key,
         ),
         transcribe=TranscribeUseCase(
             grpc_addr=engine_config.asr_grpc_addr,

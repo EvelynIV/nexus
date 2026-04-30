@@ -11,8 +11,8 @@ from nexus.infrastructure.tts import GrpcDuplexTTSBackend, create_tts_backend
 def _base_kwargs() -> dict:
     return {
         "asr_grpc_addr": "localhost:5000",
-        "chat_base_url": "http://localhost:10002/v1",
-        "chat_api_key": "dummy-key",
+        "responses_base_url": "http://localhost:10002/v1",
+        "responses_api_key": "dummy-key",
     }
 
 

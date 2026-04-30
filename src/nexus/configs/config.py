@@ -5,8 +5,8 @@ from pathlib import Path
 @dataclass
 class NexusConfig:
     asr_grpc_addr: str
-    chat_base_url: str
-    chat_api_key: str
+    responses_base_url: str | None = None
+    responses_api_key: str | None = None
     realtime_api_key: str | None = None
     realtime_client_secret_ttl_seconds: int = 600
     realtime_session_max_seconds: int = 3600

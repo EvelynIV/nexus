@@ -18,7 +18,7 @@ class _FakeSession:
     audio_input_sample_rate: int = 16000
     asr_sample_rate: int = 16000
     audio_queue: asyncio.Queue[np.ndarray | None] = field(default_factory=asyncio.Queue)
-    _current_chat_task: asyncio.Task | None = None
+    _current_response_task: asyncio.Task | None = None
     _conversation_tail_item_id: str | None = None
     _conversation_previous_item_ids: dict[str, str | None] = field(default_factory=dict)
 
@@ -32,11 +32,11 @@ class _FakeSession:
                 break
             yield chunk
 
-    def get_current_chat_task(self):
-        return self._current_chat_task
+    def get_current_response_task(self):
+        return self._current_response_task
 
-    def set_current_chat_task(self, task):
-        self._current_chat_task = task
+    def set_current_response_task(self, task):
+        self._current_response_task = task
 
     def request_cancel(self, reason: str = "turn_detected") -> None:
         del reason
@@ -73,7 +73,7 @@ async def test_transcription_worker_uses_structured_speaker_context() -> None:
 
     captured_turns: list[PreparedRealtimeUserTurn] = []
 
-    async def _chat_worker(session_arg, turn: PreparedRealtimeUserTurn) -> None:
+    async def _response_worker(session_arg, turn: PreparedRealtimeUserTurn) -> None:
         del session_arg
         captured_turns.append(turn)
 
@@ -99,16 +99,16 @@ async def test_transcription_worker_uses_structured_speaker_context() -> None:
         inferencer=inferencer,
         session=session,
         interim_results=False,
-        is_chat_model=True,
-        chat_worker=_chat_worker,
+        auto_response_enabled=True,
+        response_worker=_response_worker,
     )
 
     completed_events = [
         event for event in session.events
         if getattr(event, "type", None) == "conversation.item.input_audio_transcription.completed"
     ]
-    if session.get_current_chat_task() is not None:
-        await session.get_current_chat_task()
+    if session.get_current_response_task() is not None:
+        await session.get_current_response_task()
 
     assert completed_events[0].transcript == "来给我讲个故事"
     assert captured_turns[0].display_transcript == "来给我讲个故事"
@@ -131,7 +131,7 @@ async def test_transcription_worker_skips_non_final_non_positive_end_timestamp_r
 
     captured_turns: list[PreparedRealtimeUserTurn] = []
 
-    async def _chat_worker(session_arg, turn: PreparedRealtimeUserTurn) -> None:
+    async def _response_worker(session_arg, turn: PreparedRealtimeUserTurn) -> None:
         del session_arg
         captured_turns.append(turn)
 
@@ -149,10 +149,10 @@ async def test_transcription_worker_skips_non_final_non_positive_end_timestamp_r
         inferencer=inferencer,
         session=session,
         interim_results=False,
-        is_chat_model=True,
-        chat_worker=_chat_worker,
+        auto_response_enabled=True,
+        response_worker=_response_worker,
     )
 
     assert session.events == []
     assert captured_turns == []
-    assert session.get_current_chat_task() is None
+    assert session.get_current_response_task() is None

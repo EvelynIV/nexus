@@ -83,14 +83,19 @@ class TextResponseContext:
         self,
         session: "RealtimeSessionState",
         modalities: List[str] = None,
+        *,
+        response_id_value: str | None = None,
+        item_id_value: str | None = None,
+        conversation_id_value: str | None = None,
+        emit_response_lifecycle: bool = True,
     ):
         self.session = session
         self.modalities = modalities or ["text"]
+        self.emit_response_lifecycle = emit_response_lifecycle
         
-        # 生成 IDs
-        self.item_id = item_id()
-        self.response_id = response_id()
-        self.conversation_id = conversation_id()
+        self.item_id = item_id_value or item_id()
+        self.response_id = response_id_value or response_id()
+        self.conversation_id = conversation_id_value or conversation_id()
         
         # 累积的内容
         self._content = ""
@@ -105,15 +110,15 @@ class TextResponseContext:
     
     async def __aenter__(self) -> "TextResponseContext":
         """发送前置事件"""
-        # 1. Response created
-        await self.session.send_event(
-            build_response_created_event(
-                response_id=self.response_id,
-                conversation_id=self.conversation_id,
-                event_id=event_id(),
-                modalities=self.modalities,
+        if self.emit_response_lifecycle:
+            await self.session.send_event(
+                build_response_created_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                )
             )
-        )
         
         # 2. 创建 assistant message item
         self._item = build_assistant_message_item(
@@ -213,40 +218,40 @@ class TextResponseContext:
             )
         )
         
-        # 11. Response done（取消时通过 response.status/status_details 表达）
-        if cancelled:
-            reason = (
-                self.session.get_cancel_reason()
-                if hasattr(self.session, "get_cancel_reason")
-                else "turn_detected"
-            )
-            await self.session.send_event(
-                build_response_done_event(
-                    response_id=self.response_id,
-                    conversation_id=self.conversation_id,
-                    event_id=event_id(),
-                    modalities=self.modalities,
-                    status="cancelled",
-                    reason=reason,
+        if self.emit_response_lifecycle:
+            if cancelled:
+                reason = (
+                    self.session.get_cancel_reason()
+                    if hasattr(self.session, "get_cancel_reason")
+                    else "turn_detected"
                 )
-            )
-            logger.info(
-                f"TextResponseContext cancelled: item_id={self.item_id}, "
-                f"response_id={self.response_id}, partial_content='{self._content}'"
-            )
-        else:
-            await self.session.send_event(
-                build_response_done_event(
-                    response_id=self.response_id,
-                    conversation_id=self.conversation_id,
-                    event_id=event_id(),
-                    modalities=self.modalities,
+                await self.session.send_event(
+                    build_response_done_event(
+                        response_id=self.response_id,
+                        conversation_id=self.conversation_id,
+                        event_id=event_id(),
+                        modalities=self.modalities,
+                        status="cancelled",
+                        reason=reason,
+                    )
                 )
-            )
-            logger.info(
-                f"TextResponseContext completed: item_id={self.item_id}, "
-                f"response_id={self.response_id}, content='{self._content}'"
-            )
+                logger.info(
+                    f"TextResponseContext cancelled: item_id={self.item_id}, "
+                    f"response_id={self.response_id}, partial_content='{self._content}'"
+                )
+            else:
+                await self.session.send_event(
+                    build_response_done_event(
+                        response_id=self.response_id,
+                        conversation_id=self.conversation_id,
+                        event_id=event_id(),
+                        modalities=self.modalities,
+                    )
+                )
+                logger.info(
+                    f"TextResponseContext completed: item_id={self.item_id}, "
+                    f"response_id={self.response_id}, content='{self._content}'"
+                )
     
     async def send_text_delta(self, delta: str):
         """发送文本增量"""
@@ -284,6 +289,10 @@ class AudioResponseContext:
         segment_concurrency: int = 3,
         tts_sample_rate: int | None = None,
         output_sample_rate: int | None = None,
+        response_id_value: str | None = None,
+        item_id_value: str | None = None,
+        conversation_id_value: str | None = None,
+        emit_response_lifecycle: bool = True,
     ):
         self.session = session
         self.tts_backend = tts_backend
@@ -294,9 +303,10 @@ class AudioResponseContext:
         self.min_segment_chars = min_segment_chars
         self.segment_concurrency = segment_concurrency
 
-        self.item_id = item_id()
-        self.response_id = response_id()
-        self.conversation_id = conversation_id()
+        self.emit_response_lifecycle = emit_response_lifecycle
+        self.item_id = item_id_value or item_id()
+        self.response_id = response_id_value or response_id()
+        self.conversation_id = conversation_id_value or conversation_id()
 
         self._display_text = ""
         self._tts_text = ""
@@ -344,14 +354,15 @@ class AudioResponseContext:
         return self._tts_text
 
     async def __aenter__(self) -> "AudioResponseContext":
-        await self.session.send_event(
-            build_response_created_event(
-                response_id=self.response_id,
-                conversation_id=self.conversation_id,
-                event_id=event_id(),
-                modalities=self.modalities,
+        if self.emit_response_lifecycle:
+            await self.session.send_event(
+                build_response_created_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                )
             )
-        )
 
         self._item = build_assistant_message_item(item_id=self.item_id, status="in_progress")
         self._previous_item_id = self.session.register_server_conversation_item(
@@ -608,7 +619,7 @@ class AudioResponseContext:
             )
         )
 
-        if failed:
+        if failed and self.emit_response_lifecycle:
             await self.session.send_event(
                 build_response_done_event(
                     response_id=self.response_id,
@@ -629,7 +640,7 @@ class AudioResponseContext:
             )
             return
 
-        if cancelled:
+        if cancelled and self.emit_response_lifecycle:
             reason = (
                 self.session.get_cancel_reason()
                 if hasattr(self.session, "get_cancel_reason")
@@ -654,14 +665,15 @@ class AudioResponseContext:
             )
             return
 
-        await self.session.send_event(
-            build_response_done_event(
-                response_id=self.response_id,
-                conversation_id=self.conversation_id,
-                event_id=event_id(),
-                modalities=self.modalities,
+        if self.emit_response_lifecycle:
+            await self.session.send_event(
+                build_response_done_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                )
             )
-        )
         logger.info(
             "AudioResponseContext completed: item_id=%s response_id=%s content_len=%s deltas=%s",
             self.item_id,
@@ -724,16 +736,23 @@ class FunctionCallResponseContext:
         name: str,
         call_id: str,
         modalities: List[str] = None,
+        *,
+        response_id_value: str | None = None,
+        item_id_value: str | None = None,
+        conversation_id_value: str | None = None,
+        emit_response_lifecycle: bool = True,
+        emit_arguments_done: bool = True,
     ):
         self.session = session
         self.name = name
         self.call_id = call_id
         self.modalities = modalities or ["text"]
+        self.emit_response_lifecycle = emit_response_lifecycle
+        self.emit_arguments_done = emit_arguments_done
         
-        # 生成 IDs
-        self.item_id = item_id()
-        self.response_id = response_id()
-        self.conversation_id = conversation_id()
+        self.item_id = item_id_value or item_id()
+        self.response_id = response_id_value or response_id()
+        self.conversation_id = conversation_id_value or conversation_id()
         
         # 累积的参数
         self._arguments = ""
@@ -748,15 +767,15 @@ class FunctionCallResponseContext:
     
     async def __aenter__(self) -> "FunctionCallResponseContext":
         """发送前置事件"""
-        # 1. Response created
-        await self.session.send_event(
-            build_response_created_event(
-                response_id=self.response_id,
-                conversation_id=self.conversation_id,
-                event_id=event_id(),
-                modalities=self.modalities,
+        if self.emit_response_lifecycle:
+            await self.session.send_event(
+                build_response_created_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                )
             )
-        )
         
         # 2. 创建 function call item
         self._item = build_function_call_item(
@@ -792,16 +811,16 @@ class FunctionCallResponseContext:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """发送后置事件"""
-        # 5. Function call arguments done
-        await self.session.send_event(
-            build_function_call_arguments_done(
-                arguments=self._arguments,
-                call_id=self.call_id,
-                item_id=self.item_id,
-                response_id=self.response_id,
-                name=self.name,
+        if self.emit_arguments_done:
+            await self.session.send_event(
+                build_function_call_arguments_done(
+                    arguments=self._arguments,
+                    call_id=self.call_id,
+                    item_id=self.item_id,
+                    response_id=self.response_id,
+                    name=self.name,
+                )
             )
-        )
         
         # 6. 更新 item 状态
         self._item = build_function_call_item(
@@ -830,15 +849,15 @@ class FunctionCallResponseContext:
             )
         )
         
-        # 9. Response done
-        await self.session.send_event(
-            build_response_done_event(
-                response_id=self.response_id,
-                conversation_id=self.conversation_id,
-                event_id=event_id(),
-                modalities=self.modalities,
+        if self.emit_response_lifecycle:
+            await self.session.send_event(
+                build_response_done_event(
+                    response_id=self.response_id,
+                    conversation_id=self.conversation_id,
+                    event_id=event_id(),
+                    modalities=self.modalities,
+                )
             )
-        )
         
         logger.info(
             f"FunctionCallResponseContext completed: item_id={self.item_id}, "

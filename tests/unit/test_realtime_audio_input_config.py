@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -74,6 +74,12 @@ class _FakeTool:
 @dataclass
 class _FakeSession:
     session_id: str = "sess_test"
+    tools: list[_FakeTool] = field(
+        default_factory=lambda: [
+            _FakeTool({"type": "function", "name": "demo", "parameters": {"type": "object"}})
+        ]
+    )
+    mcp_tools: list[dict] = field(default_factory=list)
 
     def get_output_modalities(self) -> list[str]:
         return ["audio"]
@@ -83,9 +89,6 @@ class _FakeSession:
 
     def get_audio_output_config(self) -> dict:
         return {"format_type": "audio/pcm", "voice": "alloy", "speed": 1.0}
-
-    def get_all_tools(self) -> list[_FakeTool]:
-        return [_FakeTool({"type": "function", "name": "demo", "parameters": {"type": "object"}})]
 
 
 def test_session_payload_contains_input_and_output_audio_rates() -> None:
@@ -103,15 +106,15 @@ async def test_apply_session_update_rejects_invalid_input_rate_without_session_u
 
     writer = SimpleNamespace(send_error=AsyncMock())
     session = SimpleNamespace(
-        chat_model="gpt-4o-realtime-preview",
+        response_model="gpt-4o-realtime-preview",
         writer=writer,
         update_output_modalities=lambda modalities: modalities,
         update_audio_output_config=lambda **kwargs: kwargs,
-        mcp_registry=SimpleNamespace(server_labels=[]),
+        mcp_tools=[],
         get_output_modalities=lambda: ["text"],
         get_audio_input_config=lambda: {"format_type": "audio/pcm", "sample_rate": 24000},
         get_audio_output_config=lambda: {"format_type": "audio/pcm", "voice": "alloy", "speed": 1.0},
-        get_all_tools=lambda: [],
+        tools=[],
         send_event=AsyncMock(),
     )
     update = SimpleNamespace(

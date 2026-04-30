@@ -32,15 +32,15 @@ async def test_apply_session_update_rejects_voice_change_after_audio_started() -
     writer = SimpleNamespace(send_error=AsyncMock())
     session = SimpleNamespace(
         session_id="sess_test",
-        chat_model="gpt-realtime",
+        response_model="gpt-realtime",
         writer=writer,
         update_output_modalities=lambda modalities: modalities,
         update_audio_output_config=lambda **kwargs: kwargs,
-        mcp_registry=SimpleNamespace(server_labels=[]),
+        mcp_tools=[],
         get_output_modalities=lambda: ["audio", "text"],
         get_audio_input_config=lambda: {"format_type": "audio/pcm", "sample_rate": 24000},
         get_audio_output_config=lambda: {"format_type": "audio/pcm", "voice": "alloy", "speed": 1.0},
-        get_all_tools=lambda: [],
+        tools=[],
         send_event=AsyncMock(),
         is_audio_voice_locked=lambda: True,
         audio_output_voice="alloy",
@@ -71,22 +71,20 @@ async def test_apply_session_update_rejects_voice_change_after_audio_started() -
 async def test_apply_session_update_accepts_dict_audio_voice_and_modalities() -> None:
     service = _service_without_init()
     service.tts_backend = object()
-    service._sync_mcp_servers = AsyncMock()
 
     applied_modalities: list[str] = []
     applied_audio_config: list[dict] = []
     writer = SimpleNamespace(send_error=AsyncMock())
     session = SimpleNamespace(
         session_id="sess_test",
-        chat_model="gpt-realtime",
+        response_model="gpt-realtime",
         writer=writer,
         update_output_modalities=lambda modalities: applied_modalities.extend(modalities),
         update_audio_output_config=lambda **kwargs: applied_audio_config.append(kwargs),
-        mcp_registry=SimpleNamespace(server_labels=[]),
+        mcp_tools=[],
         get_output_modalities=lambda: ["text"],
         get_audio_input_config=lambda: {"format_type": "audio/pcm", "sample_rate": 24000},
         get_audio_output_config=lambda: {"format_type": "audio/pcm", "voice": "alloy", "speed": 1.0},
-        get_all_tools=lambda: [],
         send_event=AsyncMock(),
         is_audio_voice_locked=lambda: False,
         audio_output_voice="alloy",

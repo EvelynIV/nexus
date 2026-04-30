@@ -688,25 +688,6 @@ def build_function_call_conversation_item_done_event(
     )
 
 
-def build_conversation_item_created_event(
-    item_id: str,
-    item_type: str = "function_call_output",
-) -> dict:
-    """
-    构建 conversation.item.created 事件
-    用于确认客户端发送的 conversation.item.create 已被接收和处理
-    """
-    return {
-        "type": "conversation.item.created",
-        "event_id": str(uuid.uuid4()),
-        "item": {
-            "id": item_id,
-            "type": item_type,
-            "status": "completed",
-        },
-    }
-
-
 # ============ MCP specific events ============
 
 @dataclass

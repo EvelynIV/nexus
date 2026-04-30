@@ -1,6 +1,6 @@
 # Nexus
 
-兼容 OpenAI 的 ASR/Realtime/Chat/TTS 服务器，采用清晰的分层架构。
+兼容 OpenAI 的 ASR/Realtime/Responses/TTS 服务器，采用清晰的分层架构。
 
 ## 架构
 
@@ -14,8 +14,9 @@
 - 入站 WebSocket 事件使用 `TypeAdapter(RealtimeClientEvent)` 校验。
 - 出站服务端事件在发送前使用 `TypeAdapter(RealtimeServerEvent)` 校验。
 - 事件分发基于注册表（`application.realtime.dispatch`），替代 `if/elif` 链。
-- Realtime worker 逻辑拆分为多个编排器（`transcription_worker`、`response_orchestrator`、`tool_call_orchestrator`）。
-- MCP 失败路径现在会发出 `mcp_list_tools.failed` 和 `response.mcp_call.failed`。
+- Realtime worker 逻辑拆分为多个编排器（`transcription_worker`、`response_orchestrator`）。
+- Realtime 模型输出由 Responses stream events 驱动，Nexus 只做 WebSocket、ASR、TTS 和字段映射。
+- MCP 工具默认作为 Responses `type: "mcp"` 透传给上游，Nexus 不做本地 MCP tool call。
 - Realtime 音频契约对输入和输出都严格使用 `24000Hz` 的 `audio/pcm`。
 - ASR 路径在 gRPC 推理前执行流式重采样 `24kHz -> 16kHz`。
 - 与 GA 对齐的浏览器 WebRTC 入口位于 `POST /v1/realtime/client_secrets`、`POST /v1/realtime/calls` 和 `wss /v1/realtime?call_id=...`。
